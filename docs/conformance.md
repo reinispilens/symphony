@@ -6,13 +6,13 @@ Status: core implementation and isolated integration profile green, 2026-08-24
 
 ```text
 SPEC.md contract
-    ├── deterministic unit/contract tests ── 143 passing
+    ├── deterministic unit/contract tests ── 145 passing
     ├── isolated daemon process test ─────── GitHub + hooks + Codex + release + terminal cleanup
     ├── live read-only GitHub validation ─── repository, Project, fields, queries
     └── real target mutation profile ─────── blocked by target prerequisites
 ```
 
-The 143-test suite is the conformance gate for behavior that Symphony controls. It runs without
+The 145-test suite is the conformance gate for behavior that Symphony controls. It runs without
 network access or user credentials and uses real subprocess boundaries where framing, environment,
 signals, or shell behavior matter. The isolated end-to-end profile composes a real workflow store,
 GitHub adapter, workspace hooks, Codex JSONL client, agent runner, and orchestrator against
@@ -29,7 +29,7 @@ evidence.
 | 17.4 orchestration                    | `test/orchestrator/{eligibility,orchestrator}.test.ts`                                                              | pass    |
 | 17.5 Codex client                     | `test/agent/{environment,app-server-client,runner}.test.ts` plus the executable fake app-server                     | pass    |
 | 17.6 observability                    | `test/observability/logger.test.ts`, `test/orchestrator/token-accounting.test.ts`, runtime snapshot assertions      | pass    |
-| 17.7 CLI/host                         | `test/cli.test.ts`                                                                                                  | pass    |
+| 17.7 CLI/host                         | `test/cli.test.ts`, `test/systemd-unit.test.ts`                                                                     | pass    |
 | GitHub agent-tool extension           | GraphQL mutation contract fixtures, exact target authorization, structured failures, and child-secret tests         | pass    |
 | harness-owned workspace extension     | teardown ownership, failure retention, partial-create safety, and real empty-directory/adoption spike               | pass    |
 | fresh-attempt lifecycle extension     | state versions, strict receipts, one-time workpad reset, refusal-only handoff retry, generation invalidation        | pass    |
@@ -80,7 +80,7 @@ node dist/cli.js --help
 node dist/cli.js --version
 ```
 
-The recorded run completed 23 test files and 143 tests, produced a clean strict TypeScript build,
+The recorded run completed 24 test files and 145 tests, produced a clean strict TypeScript build,
 printed CLI usage, and reported `symphony 0.1.0`.
 
 ## Honest boundary of the evidence

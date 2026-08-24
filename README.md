@@ -119,8 +119,8 @@ reconciliation continues. Stop it with `SIGINT` or `SIGTERM` for graceful worker
   normalization, errors, and agent tools.
 - [`docs/codex-app-server-protocol.md`](docs/codex-app-server-protocol.md) pins the tested Codex
   protocol boundary.
-- [`docs/operations.md`](docs/operations.md) covers deployment, logs, recovery, and a systemd
-  template.
+- [`docs/operations.md`](docs/operations.md) covers deployment, logs, recovery, and both system and
+  checked per-user systemd templates.
 - [`docs/conformance.md`](docs/conformance.md) maps the specification to deterministic evidence and
   records the remaining real-environment gate.
 

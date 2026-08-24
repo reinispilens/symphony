@@ -100,6 +100,52 @@ shell `export` syntax. Adjust paths and the service account to the host, but kee
 workflow and workspace root disjoint. `KillMode=control-group` is a final supervisor-level safety
 net for hook and Codex descendants after Symphony's own graceful process-group shutdown.
 
+## Per-user systemd service
+
+For a single-user development workstation, use the checked-in user-service template instead of
+starting Symphony from a terminal or coding-agent session. The service is owned by the user's
+systemd manager, so closing the launching shell cannot terminate the daemon.
+
+Install the template and create one required environment file per repository instance:
+
+```bash
+install -Dm0644 deploy/systemd/user/symphony@.service \
+  "$HOME/.config/systemd/user/symphony@.service"
+install -Dm0600 /dev/null "$HOME/.config/symphony/storefronts.env"
+```
+
+Populate `~/.config/symphony/storefronts.env` with absolute, stable paths. This file uses systemd
+environment-file syntax, not shell `export` syntax:
+
+```text
+SYMPHONY_NODE_PATH=/absolute/path/to/node
+SYMPHONY_CLI_PATH=/absolute/path/to/symphony/dist/cli.js
+SYMPHONY_WORKFLOW_PATH=/absolute/path/to/repository/WORKFLOW.md
+PATH=/absolute/tool/bin:/usr/local/bin:/usr/bin:/bin
+```
+
+Build Symphony before starting or restarting the unit, then let the user manager own its lifecycle:
+
+```bash
+pnpm check
+pnpm build
+systemctl --user daemon-reload
+systemctl --user enable --now symphony@storefronts.service
+systemctl --user status symphony@storefronts.service
+journalctl --user -u symphony@storefronts.service -f -o cat
+```
+
+The three configured paths are passed as separate arguments; no shell evaluates them. The required
+environment file makes a missing deployment configuration fail visibly instead of falling back to
+the caller's current directory. Do not put tracker credentials in the unit file. Prefer the user's
+existing `gh` authentication; if token authentication is necessary, keep it only in the mode-0600
+instance environment.
+
+A user manager normally survives terminal closure but may stop after the user's final login session.
+If this workstation must dispatch while that user is logged out, an administrator must explicitly
+enable lingering with `loginctl enable-linger <user>`. That host-level persistence decision is not
+performed by Symphony or implied by enabling the unit.
+
 ## Logs and health
 
 The default sink is stderr, which systemd captures in the journal. Each line is one JSON object with
@@ -108,6 +154,8 @@ The default sink is stderr, which systemd captures in the journal. Each line is 
 ```bash
 journalctl -u symphony@example.service -f -o cat
 ```
+
+For the per-user service, add `--user` to `journalctl` as shown above.
 
 Healthy operation is visible as `service outcome=started`, periodic dispatch activity, and explicit
 worker/retry/cleanup outcomes. Investigate these signals first:
