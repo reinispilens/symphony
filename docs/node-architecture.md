@@ -174,7 +174,8 @@ Gate: SPEC sections 17.4 and 17.6 with fake time, fake adapters, and controlled 
 
 - CLI path precedence, startup validation, signal handling, exit codes, and host-lifecycle tests.
 - A documented repository-owned workflow template and harness contract.
-- systemd unit template documentation for supervising one daemon per repository.
+- System-level deployment guidance plus a checked per-user systemd unit for supervising one daemon
+  per repository without tying its lifetime to a terminal or coding-agent session.
 - An isolated daemon journey that releases an inactive Human Review claim, observes a later
   terminal transition on the normal poll cadence, and invokes the repository-owned teardown hook.
 
