@@ -1,0 +1,6 @@
+dist
+coverage
+node_modules
+elixir/deps
+elixir/_build
+elixir/priv/static

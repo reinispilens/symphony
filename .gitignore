@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+# Elixir reference build products
+elixir/deps/
+elixir/_build/

@@ -83,7 +83,7 @@ Important boundary:
    - Performs validation used by the orchestrator before dispatch.
 
 3. `Issue Tracker Adapter`
-   - Fetches candidate issues in active states.
+   - Fetches issues in requested active and terminal states for polling/reconciliation.
    - Fetches current states for specific issue IDs (reconciliation).
    - Fetches terminal-state issues during startup cleanup.
    - Normalizes tracker payloads into a stable issue model.
@@ -178,6 +178,11 @@ Fields:
   - Lower numbers are higher priority in dispatch sorting.
 - `state` (string)
   - REQUIRED current provider-native state name.
+- `state_version` (string or null)
+  - OPTIONAL opaque version of the current state assignment. A changed value means the issue
+    entered or re-entered its current state.
+  - REQUIRED at dispatch time when the state is configured in `fresh_attempt_states`; absence must
+    refuse that attempt before launching the coding agent.
 - `branch_name` (string or null)
   - Tracker-provided branch metadata if available.
 - `url` (string or null)
@@ -276,6 +281,8 @@ Fields:
 - `due_at_ms` (monotonic clock timestamp)
 - `timer_handle` (runtime-specific timer reference)
 - `error` (string or null)
+- `kind` (`continuation`, `failure`, or `fresh_handoff`)
+- `fresh_attempt_generation` (string or null)
 
 #### 4.1.8 Orchestrator Runtime State
 
@@ -391,13 +398,27 @@ Fields:
   - Default: `[]`.
   - An issue MUST contain every configured label to dispatch or continue.
   - Matching ignores case and surrounding whitespace.
-  - A blank configured label matches no issue.
+  - Values MUST be non-blank and unique after matching normalization.
+- `excluded_labels` (list of strings)
+  - Default: `[]`.
+  - An issue MUST contain none of the configured labels to dispatch or continue.
+  - Matching ignores case and surrounding whitespace.
+  - Values MUST be non-blank and unique after matching normalization.
+  - The normalized required and excluded sets MUST NOT overlap.
 - `active_states` (list of strings)
   - REQUIRED unless the selected adapter profile documents a default.
   - Values are provider-native state names compared case-insensitively by the scheduler.
 - `terminal_states` (list of strings)
   - REQUIRED unless the selected adapter profile documents a default.
   - Values are provider-native state names compared case-insensitively by the scheduler.
+- `fresh_attempt_states` (list of strings)
+  - Default: `[]`.
+  - Every entry MUST also be in `active_states`.
+  - Each distinct tracker state version requires a newly provisioned attempt before agent launch.
+- `fresh_attempt_failure_state` (string)
+  - REQUIRED exactly when `fresh_attempt_states` is non-empty.
+  - MUST be neither active nor terminal. The driver records a provisioning blocker before moving a
+    refused attempt to this state.
 
 #### 5.3.2 `polling` (object)
 
@@ -611,6 +632,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.kind`: string, REQUIRED, selects one supported adapter
 - `tracker.provider`: object, default `{}`, adapter-owned endpoint/scope/auth settings
 - `tracker.required_labels`: list of strings, default `[]`
+- `tracker.excluded_labels`: list of strings, default `[]`
 - `tracker.active_states`: list of provider-native state names, adapter-defined default
 - `tracker.terminal_states`: list of provider-native state names, adapter-defined default
 - `polling.interval_ms`: integer, default `30000`
@@ -728,7 +750,8 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - `claimed` and `running` checks are REQUIRED before launching any worker.
 - Reconciliation runs before dispatch on every tick.
 - Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
-- Startup terminal cleanup removes stale workspaces for issues already in terminal states.
+- Startup cleanup sweeps every terminal item, while successful normal polls clean newly observed
+  terminal items whose worker claims have already been released.
 
 ## 8. Polling, Scheduling, and Reconciliation
 
@@ -743,13 +766,17 @@ Tick sequence:
 
 1. Reconcile running issues.
 2. Run dispatch preflight validation.
-3. Fetch candidate issues from tracker using active states.
-4. Sort issues by dispatch priority.
-5. Dispatch eligible issues while slots remain.
-6. Notify observability/status consumers of state changes.
+3. Using the last-known-good workflow, fetch issues whose states are in the union of active and
+   terminal states.
+4. Clean newly observed terminal workspaces that have no current claim.
+5. If preflight failed, skip new dispatch for this tick.
+6. Sort active issues by dispatch priority.
+7. Dispatch eligible issues while slots remain.
+8. Notify observability/status consumers of state changes.
 
-If per-tick validation fails, dispatch is skipped for that tick, but reconciliation still happens
-first.
+Per-tick validation failure blocks dispatch but does not block terminal reconciliation through the
+last-known-good workflow. A tracker-fetch failure defers both terminal reconciliation and new
+dispatch until the next tick.
 
 ### 8.2 Candidate Selection Rules
 
@@ -759,14 +786,15 @@ An issue is dispatch-eligible only if all are true:
 - Its state is in `active_states` and not in `terminal_states`.
 - Its adapter-provided `dispatchable` value is `true`.
 - It contains every label in `tracker.required_labels`.
+- It contains no label in `tracker.excluded_labels`.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
 
 For refresh and continuation checks, `issue_routable(issue)` means only that adapter-provided
-`dispatchable` is true and all `tracker.required_labels` match. State, claims, and concurrency are
-checked separately by the surrounding algorithm.
+`dispatchable` is true, all `tracker.required_labels` match, and no `tracker.excluded_labels`
+match. State, claims, and concurrency are checked separately by the surrounding algorithm.
 
 Sorting order (stable intent):
 
@@ -812,8 +840,9 @@ Retry handling behavior:
 
 Note:
 
-- Terminal-state workspace cleanup is handled by startup cleanup, active-run reconciliation, and
-  retry refreshes that observe a terminal transition.
+- Terminal-state workspace cleanup is handled by startup cleanup, normal-poll terminal
+  reconciliation, active-run reconciliation, and retry refreshes that observe a terminal
+  transition.
 - ID refresh avoids treating a terminal, non-active, or newly unroutable issue as merely absent.
 
 ### 8.5 Active Run Reconciliation
@@ -838,15 +867,31 @@ Part B: Tracker state refresh
   - If tracker state is neither active nor terminal: terminate worker without workspace cleanup.
 - If state refresh fails, keep workers running and try again on the next tick.
 
-### 8.6 Startup Terminal Workspace Cleanup
+### 8.6 Terminal Workspace Reconciliation
 
 When the service starts:
 
-1. Query tracker for issues in terminal states.
-2. For each returned issue identifier, remove the corresponding workspace directory.
-3. If the terminal-issues fetch fails, log a warning and continue startup.
+1. Clear the in-memory set of observed terminal issue IDs.
+2. Query the tracker for issues in terminal states.
+3. For each returned issue, invoke workspace cleanup and record its opaque issue ID as observed.
+4. If the terminal-issues fetch fails, log a warning and continue startup with an empty observed
+   set so a later successful poll can recover.
 
-This prevents stale terminal workspaces from accumulating after restarts.
+On every successful normal state-list fetch:
+
+1. Build the complete set of issue IDs currently returned in terminal states.
+2. For each terminal issue that was not observed in the preceding successful fetch and has no
+   current orchestrator claim, invoke workspace cleanup.
+3. Do not clean a claimed terminal issue from this path; its running-worker or retry lifecycle owns
+   safe shutdown and cleanup ordering.
+4. Replace the observed-terminal set only after the complete state-list fetch succeeds.
+
+The state-list request includes active and terminal states together, so normal terminal
+reconciliation does not require a second board scan. Remembering the preceding terminal set avoids
+re-running hooks for every historical terminal item on every tick. An inactive item is absent from
+that set; if it later becomes terminal after its worker claim was released, the next successful
+poll observes a new terminal ID and invokes cleanup. Restart remains a recovery sweep rather than a
+normal lifecycle requirement.
 
 ## 9. Workspace Management and Safety
 
@@ -899,6 +944,24 @@ Failure handling:
   prepared directory.
 - Reused workspaces SHOULD NOT be destructively reset on population failure unless that policy is
   explicitly chosen and documented.
+
+#### 9.3.1 Fresh-attempt extension
+
+When `tracker.fresh_attempt_states` is configured, the implementation MUST derive a filesystem-safe
+generation from the opaque issue ID and `state_version`. It MUST keep a strict durable receipt under
+the workspace root but outside the agent workspace with phases `provisioned` and `ready`.
+
+For a new generation, a harness-owned workspace reset MUST be explicit and guarded: invoke
+`before_remove` with `SYMPHONY_RUN_STATUS=fresh_attempt_reset` and
+`SYMPHONY_ATTEMPT_GENERATION=<generation>`, require successful repository-owned removal, provision
+the new workspace, delete only the provider's managed Agent Workpad, then mark the receipt `ready`.
+A restart at `provisioned` finishes the workpad reset; a restart or internal retry at matching
+`ready` reuses the new attempt and MUST NOT delete its workpad again.
+
+If any fresh preflight step cannot be proven, the coding agent MUST NOT start. The tracker adapter
+MUST upsert the exact blocker before moving the card to `fresh_attempt_failure_state`. Failure of
+that tracker handoff creates a `fresh_handoff` retry which may retry only the handoff. A changed
+state version invalidates workers and retries from the earlier generation.
 
 ### 9.4 Workspace Hooks
 
@@ -1166,11 +1229,13 @@ The `Agent Runner` wraps workspace + prompt + app-server client.
 
 Behavior:
 
-1. Create/reuse workspace for issue.
+1. Create/reuse an ordinary workspace, or complete the configured fresh-attempt preflight.
 2. Build prompt from workflow template.
-3. Start app-server session.
+3. Start app-server session only after workspace and tracker preflight succeeds.
 4. Forward app-server events to orchestrator.
-5. On any error, fail the worker attempt (the orchestrator will retry).
+5. On an ordinary error, fail the worker attempt for normal retry. Return a typed
+   `fresh_attempt_refused` error for preflight refusal so the orchestrator performs only the human
+   handoff.
 
 Note:
 
@@ -1183,6 +1248,10 @@ OPTIONAL provider-native agent tools. Do not add generic comment/state/attachmen
 make providers look alike; those operations lose useful provider semantics and are not needed by
 the orchestrator.
 
+An adapter used with `fresh_attempt_states` additionally provides driver-only controls to delete
+its one managed workpad and to persist a blocker before assigning the configured failure state.
+These controls are not generic agent tools and are not exposed to the coding-agent child.
+
 ### 11.1 REQUIRED Adapter Operations
 
 An implementation MUST support these adapter operations:
@@ -1190,12 +1259,12 @@ An implementation MUST support these adapter operations:
 1. `fetch_issues_by_states(state_names)`
    - Return normalized issues visible in the configured tracker scope and requested state names.
    - The adapter MUST apply provider-side scope selection and pagination.
-   - Used with configured active states for candidate polling and terminal states for startup
-     cleanup.
+   - Used with configured active plus terminal states for normal polling and with terminal states
+     alone for startup cleanup.
    - When used for candidate polling, include active scoped issues even when
      `dispatchable=false`; the scheduler owns that final filter.
-   - The orchestrator applies `required_labels`, `dispatchable`, claims, retries, and concurrency
-     after normalization.
+   - The orchestrator applies `required_labels`, `excluded_labels`, `dispatchable`, claims,
+     retries, and concurrency after normalization.
    - An empty `state_names` list MUST return an empty result without a provider request.
 
 2. `fetch_issues_by_ids(issue_ids)`
@@ -1700,7 +1769,7 @@ After restart:
 - No running sessions are assumed recoverable.
 - Service recovers by:
   - startup terminal workspace cleanup
-  - fresh polling of active issues
+  - fresh polling of active and terminal issues
   - re-dispatching eligible work
 
 ### 14.4 Operator Intervention Points
@@ -1713,8 +1782,9 @@ Operators can control behavior by:
 - Changing issue states in the tracker:
   - terminal state -> running session is stopped and workspace cleaned when reconciled
   - non-active state -> running session is stopped without cleanup
-- Restarting the service for process recovery or deployment (not as the normal path for applying
-  workflow config changes).
+- Restarting the service for process recovery, deployment, or an operator-requested retry of a
+  retained terminal workspace after its guarded teardown has been repaired. Restart is not the
+  normal path for observing a terminal transition or applying workflow config changes.
 
 ## 15. Security and Operational Safety
 
@@ -1812,6 +1882,7 @@ function start_service():
     running: {},
     claimed: set(),
     retry_attempts: {},
+    observed_terminal_issue_ids: set(),
     completed: set(),
     codex_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
     codex_rate_limits: null
@@ -1837,13 +1908,24 @@ on_tick(state):
   validation = validate_dispatch_config()
   if validation is not ok:
     log_validation_error(validation)
+
+  issues = tracker.fetch_issues_by_states(active_states + terminal_states)
+  if issues failed:
+    log_tracker_error()
     notify_observers()
     schedule_tick(state.poll_interval_ms)
     return state
 
-  issues = tracker.fetch_issues_by_states(active_states)
-  if issues failed:
-    log_tracker_error()
+  current_terminal_ids = set()
+  for issue in issues:
+    if issue.state not in terminal_states:
+      continue
+    current_terminal_ids.add(issue.id)
+    if issue.id not in state.observed_terminal_issue_ids and issue.id not in state.claimed:
+      cleanup_issue_workspace(issue)
+  state.observed_terminal_issue_ids = current_terminal_ids
+
+  if validation is not ok:
     notify_observers()
     schedule_tick(state.poll_interval_ms)
     return state
@@ -2103,7 +2185,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.3 Issue Tracker Adapter
 
-- Candidate issue fetch applies configured active states and adapter-owned scope selection
+- Poll state-list fetch applies configured active/terminal states and adapter-owned scope selection
 - Empty `fetch_issues_by_states([])` returns empty without a provider call
 - Empty `fetch_issues_by_ids([])` returns empty without a provider call
 - Pagination preserves order across multiple pages
@@ -2128,6 +2210,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace
 - Reconciliation with no running issues is a no-op
+- A card that becomes terminal after its inactive continuation released the claim is cleaned on a
+  later normal poll without daemon restart
+- Normal terminal reconciliation skips claimed issues until their worker/retry lifecycle owns
+  cleanup
 - Normal worker exit schedules a short continuation retry (attempt 1)
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
@@ -2226,7 +2312,7 @@ Use the same validation profiles as Section 17:
 - Exponential retry queue with continuation retries after normal exit
 - Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
 - Reconciliation that stops runs on terminal/non-active tracker states
-- Workspace cleanup for terminal issues (startup sweep + active transition)
+- Workspace cleanup for terminal issues (startup sweep + normal-poll and active transitions)
 - Structured logs with `issue_id`, `issue_identifier`, and `session_id`
 - Operator-visible observability (structured logs; OPTIONAL snapshot/status surface)
 
