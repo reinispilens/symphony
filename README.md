@@ -123,6 +123,8 @@ reconciliation continues. Stop it with `SIGINT` or `SIGTERM` for graceful worker
   checked per-user systemd templates.
 - [`docs/conformance.md`](docs/conformance.md) maps the specification to deterministic evidence and
   records the remaining real-environment gate.
+- [`docs/dyslexify-orchestration-handoff.md`](docs/dyslexify-orchestration-handoff.md) records the
+  orchestration responsibilities and ownership boundaries surfaced by the Dyslexify MVP pilot.
 
 No HTTP server or dashboard is shipped. The Project is the human control surface; the daemon also
 exposes an in-process, read-only runtime snapshot for adapters or future operator tooling.
