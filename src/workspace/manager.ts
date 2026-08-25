@@ -4,8 +4,14 @@ import path from "node:path";
 import type { Issue } from "../domain/issue.js";
 import { SymphonyError } from "../errors.js";
 import { nullLogger, type Logger } from "../observability/logger.js";
+import type {
+  FreshAttemptPreparation,
+  RepositoryDriver,
+  RunHookContext,
+  Workspace,
+  WorkspaceLifecycleConfig,
+} from "../repository/driver.js";
 import { redactEnvironmentSecrets } from "../security/secrets.js";
-import type { HooksConfig, WorkspaceConfig } from "../workflow/config.js";
 import { HookRunner, type HookName, type HookResult } from "./hook-runner.js";
 import {
   assertAgentCwd,
@@ -19,29 +25,12 @@ import {
   type FreshAttemptReceipt,
 } from "./fresh-attempt.js";
 
-export interface Workspace {
-  readonly createdNow: boolean;
-  readonly path: string;
-  readonly workspaceKey: string;
-}
-
-export interface WorkspaceLifecycleConfig {
-  readonly hooks: HooksConfig;
-  readonly secretEnvironmentNames: readonly string[];
-  readonly workflowPath: string;
-  readonly workspace: WorkspaceConfig;
-}
-
-export interface RunHookContext {
-  readonly attempt: number | null;
-  readonly generation?: string;
-  readonly status?: string;
-}
-
-export interface FreshAttemptPreparation {
-  readonly resetWorkpad: boolean;
-  readonly workspace: Workspace;
-}
+export type {
+  FreshAttemptPreparation,
+  RunHookContext,
+  Workspace,
+  WorkspaceLifecycleConfig,
+} from "../repository/driver.js";
 
 export interface WorkspaceManagerOptions {
   readonly hookRunner?: HookRunner;
@@ -76,7 +65,8 @@ async function pathType(
   }
 }
 
-export class WorkspaceManager {
+/** Transitional directory and repository-hook compatibility driver. */
+export class WorkspaceManager implements RepositoryDriver {
   readonly #hookRunner: HookRunner;
   readonly #logger: Logger;
   readonly #processEnvironment: Readonly<Record<string, string | undefined>>;
@@ -190,6 +180,7 @@ export class WorkspaceManager {
     issue: Issue,
     config: WorkspaceLifecycleConfig,
     generation: string,
+    _context?: RunHookContext,
   ): Promise<FreshAttemptPreparation> {
     if (generation.trim() === "") {
       throw new SymphonyError(
@@ -243,6 +234,7 @@ export class WorkspaceManager {
     issue: Issue,
     config: WorkspaceLifecycleConfig,
     generation: string,
+    _context?: RunHookContext,
   ): Promise<void> {
     const location = workspaceLocation(config.workspace.root, issue.identifier);
     const receipt = await readFreshAttemptReceipt(

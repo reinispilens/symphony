@@ -16,6 +16,7 @@ import type {
 } from "./events.js";
 import {
   AppServerProcessTransport,
+  type AppServerCommand,
   type AppServerTransportHandler,
   type ServerNotificationMessage,
   type ServerRequestMessage,
@@ -27,7 +28,7 @@ const DEFAULT_APPROVAL_POLICY = "never";
 const DEFAULT_THREAD_SANDBOX = "workspace-write";
 
 export interface CodexAppServerSessionOptions {
-  readonly command: string;
+  readonly command: AppServerCommand;
   readonly cwd: string;
   readonly readTimeoutMs: number;
   readonly turnTimeoutMs: number;

@@ -65,6 +65,33 @@ function startTurn(message) {
     failRequest(message.id, "turn cwd did not match process cwd");
     return;
   }
+  const expectedPrompt = process.env.FAKE_CODEX_EXPECT_PROMPT;
+  if (
+    expectedPrompt !== undefined &&
+    message.params?.input?.[0]?.text !== expectedPrompt
+  ) {
+    failRequest(message.id, "turn prompt did not match accepted context");
+    return;
+  }
+  if (process.env.FAKE_CODEX_EXPECT_MANAGED_POLICY === "1") {
+    const policy = message.params?.sandboxPolicy;
+    const temporary = process.env.TMPDIR;
+    if (
+      policy?.type !== "workspaceWrite" ||
+      policy?.networkAccess !== false ||
+      policy?.excludeSlashTmp !== true ||
+      policy?.excludeTmpdirEnvVar !== true ||
+      !Array.isArray(policy?.writableRoots) ||
+      policy.writableRoots.length !== 1 ||
+      policy.writableRoots[0] !== temporary ||
+      process.env.TMP !== temporary ||
+      process.env.TEMP !== temporary ||
+      !temporary?.includes("/agent-runtime/")
+    ) {
+      failRequest(message.id, "managed sandbox policy was not exact");
+      return;
+    }
+  }
   send({ id: message.id, result: { turn: turn(turnId) } });
   send({ method: "turn/started", params: { threadId, turn: turn(turnId) } });
   process.stderr.write("fake diagnostic; this is not protocol JSON\n");

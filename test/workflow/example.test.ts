@@ -13,7 +13,7 @@ const examplePath = fileURLToPath(
 );
 
 describe("WORKFLOW.example.md", () => {
-  it("is a valid harness/GitHub workflow with a strictly renderable prompt", async () => {
+  it("remains a parseable migration reference with a strictly renderable prompt", async () => {
     const loaded = await loadWorkflow(examplePath);
     const config = resolveServiceConfig(loaded.definition, {
       workflowPath: loaded.path,
@@ -23,9 +23,30 @@ describe("WORKFLOW.example.md", () => {
       environment: {},
     });
 
+    expect(config.deployment).toBeNull();
+
     expect(config.workspace).toMatchObject({
-      provider: "harness",
+      provider: "git-worktree",
       root: "/absolute/path/to/repository-workspaces",
+    });
+    expect(config.repository).toEqual({
+      identity: "your-owner/your-repository",
+      hostname: "github.com",
+      baseRef: "refs/remotes/origin/main",
+      branchPrefix: "symphony/",
+      profileDigest: null,
+    });
+    expect(config.preparation).toEqual({
+      driver: "pnpm",
+      frozenLockfile: true,
+      lifecycleScripts: false,
+      timeoutMs: 300_000,
+    });
+    expect(config.hooks).toMatchObject({
+      afterCreate: null,
+      beforeRun: null,
+      afterRun: null,
+      beforeRemove: null,
     });
     expect(config.agent.maxConcurrentAgents).toBe(1);
     expect(config.tracker.provider["agent_status_targets"]).toEqual([

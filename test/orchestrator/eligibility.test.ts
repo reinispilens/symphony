@@ -11,6 +11,7 @@ import { issue } from "../support/factories.js";
 
 function config(): ServiceConfig {
   return {
+    deployment: null,
     tracker: {
       kind: "test",
       provider: {},
@@ -21,6 +22,13 @@ function config(): ServiceConfig {
       requiredLabels: ["ready", "Agent"],
       excludedLabels: ["blocked"],
       secretEnvironmentNames: [],
+    },
+    repository: null,
+    preparation: {
+      driver: "none",
+      frozenLockfile: true,
+      lifecycleScripts: false,
+      timeoutMs: 300_000,
     },
     polling: { intervalMs: 30_000 },
     workspace: { provider: "directory", root: "/tmp/symphony-tests" },

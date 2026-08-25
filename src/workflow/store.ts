@@ -21,6 +21,27 @@ export type ReloadResult =
   | { readonly status: "reloaded"; readonly snapshot: WorkflowSnapshot }
   | { readonly status: "rejected"; readonly error: unknown };
 
+/** An immutable source assembled from one accepted deployment binding and Git revision. */
+export class PinnedWorkflowStore {
+  readonly current: WorkflowSnapshot;
+
+  constructor(snapshot: WorkflowSnapshot) {
+    this.current = snapshot;
+  }
+
+  checkForUpdates(): Promise<ReloadResult> {
+    return Promise.resolve({ status: "unchanged" });
+  }
+
+  startWatching(): void {
+    // Binding/profile changes require an explicit daemon restart.
+  }
+
+  close(): void {
+    // No watcher or other process-local resource exists.
+  }
+}
+
 export interface WorkflowStoreOptions {
   readonly workflowPath: string;
   readonly trackerProfiles: TrackerConfigProfiles;
@@ -35,6 +56,21 @@ export interface WorkflowStoreOptions {
 
 function hash(source: string): string {
   return createHash("sha256").update(source).digest("hex");
+}
+
+function restartBoundary(config: ServiceConfig): string {
+  const trackerIdentity: Record<string, unknown> = {
+    kind: config.tracker.kind,
+  };
+  for (const key of ["hostname", "owner", "repo", "project"] as const) {
+    const value = config.tracker.provider[key];
+    if (value !== undefined) trackerIdentity[key] = value;
+  }
+  return JSON.stringify({
+    tracker: trackerIdentity,
+    repository: config.repository,
+    workspace: config.workspace,
+  });
 }
 
 export class WorkflowStore {
@@ -108,6 +144,15 @@ export class WorkflowStore {
         loaded.path,
         sourceHash,
       );
+      if (
+        this.#current !== null &&
+        restartBoundary(snapshot.config) !==
+          restartBoundary(this.#current.config)
+      ) {
+        throw new Error(
+          "Workflow tracker/repository/workspace topology changed and requires a daemon restart",
+        );
+      }
       this.#lastObservedHash = sourceHash;
       this.#current = snapshot;
       this.#logger.info("Workflow configuration reloaded", {

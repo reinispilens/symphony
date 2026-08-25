@@ -1,12 +1,24 @@
+import { randomUUID } from "node:crypto";
+
 import type { AgentRunOptions, AgentRunResult } from "../agent/runner.js";
 import { AgentError } from "../agent/errors.js";
 import type { AgentEvent } from "../agent/events.js";
 import type { Issue } from "../domain/issue.js";
-import { errorMessage } from "../errors.js";
+import { errorMessage, SymphonyError } from "../errors.js";
 import { nullLogger, type Logger } from "../observability/logger.js";
+import type { RepositoryCleanupAuthority } from "../repository/driver.js";
 import type { JsonValue } from "../shared/json.js";
+import type {
+  AttemptStatus,
+  ExpiredRuntimeLeaseCandidate,
+  StartedAttempt,
+  WorkspaceMode,
+} from "../state/model.js";
+import type { SymphonyStateStore } from "../state/store.js";
+import { StateStoreError } from "../state/store.js";
 import type { TrackerAdapter } from "../tracker/adapter.js";
 import { freshAttemptGeneration } from "../workspace/fresh-attempt.js";
+import type { Workspace } from "../workspace/manager.js";
 import type { ReloadResult, WorkflowSnapshot } from "../workflow/store.js";
 import {
   compareIssuesForDispatch,
@@ -30,12 +42,21 @@ import {
 } from "./token-accounting.js";
 
 const CONTINUATION_DELAY_MS = 1_000;
+const MINIMUM_RUNTIME_LEASE_MS = 120_000;
 
 type TerminationIntent = "released" | "stalled" | "stopping" | "terminal";
 type RetryKind = "continuation" | "failure" | "fresh_handoff";
 
 export interface AgentExecutionPort {
-  cleanupWorkspace(issue: Issue, workflow: WorkflowSnapshot): Promise<void>;
+  cleanupWorkspace(
+    issue: Issue,
+    workflow: WorkflowSnapshot,
+    authority?: RepositoryCleanupAuthority,
+  ): Promise<void>;
+  quiesceRuntime(
+    workflow: WorkflowSnapshot,
+    authority?: RepositoryCleanupAuthority,
+  ): Promise<void>;
   run(options: AgentRunOptions): Promise<AgentRunResult>;
 }
 
@@ -52,17 +73,23 @@ export interface WorkflowSource {
 
 export interface OrchestratorOptions {
   readonly agentRunner: AgentExecutionPort;
+  readonly stateStore: SymphonyStateStore;
   readonly trackerFactory: TrackerAdapterFactory;
   readonly workflowStore: WorkflowSource;
   readonly clock?: OrchestratorClock;
+  readonly instanceId?: string;
   readonly logger?: Logger;
 }
 
 interface RunningEntry {
   readonly abortController: AbortController;
+  readonly attemptId: string;
   readonly attempt: number | null;
+  readonly controllerGeneration: number;
   readonly freshAttemptGeneration: string | null;
   readonly startedAtMs: number;
+  readonly runtimeLeaseToken: string;
+  readonly workSessionId: string;
   readonly tracker: TrackerAdapter;
   readonly workflow: WorkflowSnapshot;
   issue: Issue;
@@ -81,12 +108,14 @@ interface RunningEntry {
 
 interface RetryEntry {
   readonly attempt: number;
+  readonly controllerGeneration: number;
   readonly dueAtMs: number;
   readonly error: string | null;
   readonly freshAttemptGeneration: string | null;
   readonly issue: Issue;
   readonly kind: RetryKind;
   readonly timer: TimerHandle;
+  readonly workSessionId: string;
   readonly workspaceWorkflow: WorkflowSnapshot;
 }
 
@@ -98,6 +127,7 @@ interface MutableAggregateTotals {
 }
 
 export interface RunningSnapshotRow {
+  readonly attempt_id: string;
   readonly attempt: number | null;
   readonly issue_id: string;
   readonly issue_identifier: string;
@@ -116,6 +146,7 @@ export interface RunningSnapshotRow {
     readonly total_tokens: number;
   };
   readonly turn_count: number;
+  readonly work_session_id: string;
 }
 
 export interface RetrySnapshotRow {
@@ -178,6 +209,56 @@ function iso(timestampMs: number): string {
   return new Date(timestampMs).toISOString();
 }
 
+function repositoryIdentity(workflow: WorkflowSnapshot): string {
+  if (workflow.config.repository !== null) {
+    return workflow.config.repository.identity;
+  }
+  const owner = workflow.config.tracker.provider["owner"];
+  const repo = workflow.config.tracker.provider["repo"];
+  if (
+    typeof owner === "string" &&
+    owner.trim() !== "" &&
+    typeof repo === "string" &&
+    repo.trim() !== ""
+  ) {
+    return `${owner}/${repo}`;
+  }
+  // Compatibility profiles may predate an explicit repository identity. The
+  // workflow path is stable within that deployment and is never read from the
+  // candidate workspace.
+  return `workflow:${workflow.path}`;
+}
+
+function trackerControllerId(workflow: WorkflowSnapshot): string {
+  return `tracker:${workflow.config.tracker.kind}:${repositoryIdentity(workflow)}`;
+}
+
+function runtimeLeaseExpiresAt(
+  nowMs: number,
+  workflow: WorkflowSnapshot,
+): string {
+  const duration = Math.max(
+    MINIMUM_RUNTIME_LEASE_MS,
+    workflow.config.polling.intervalMs * 4,
+  );
+  return iso(nowMs + duration);
+}
+
+function workspaceMode(
+  workflow: WorkflowSnapshot,
+): Exclude<WorkspaceMode, "managed"> {
+  return workflow.config.workspace.provider === "harness"
+    ? "legacy-hook"
+    : "legacy-directory";
+}
+
+function expectedDispatchRefusal(error: unknown): error is StateStoreError {
+  return (
+    error instanceof StateStoreError &&
+    (error.code === "active_runtime_lease" || error.code === "retry_not_due")
+  );
+}
+
 /**
  * The single mutable authority for claims, workers, retries, and aggregates.
  * Long-running workers report back through a serialized mutation queue.
@@ -186,10 +267,12 @@ export class Orchestrator {
   readonly #agentRunner: AgentExecutionPort;
   readonly #claimed = new Set<string>();
   readonly #clock: OrchestratorClock;
+  readonly #instanceId: string;
   readonly #logger: Logger;
   readonly #observedTerminalIssueIds = new Set<string>();
   readonly #retries = new Map<string, RetryEntry>();
   readonly #running = new Map<string, RunningEntry>();
+  readonly #stateStore: SymphonyStateStore;
   readonly #totals: MutableAggregateTotals = {
     inputTokens: 0,
     outputTokens: 0,
@@ -208,7 +291,9 @@ export class Orchestrator {
   constructor(options: OrchestratorOptions) {
     this.#agentRunner = options.agentRunner;
     this.#clock = options.clock ?? systemClock;
+    this.#instanceId = options.instanceId ?? randomUUID();
     this.#logger = options.logger ?? nullLogger;
+    this.#stateStore = options.stateStore;
     this.#trackerFactory = options.trackerFactory;
     this.#workflowStore = options.workflowStore;
   }
@@ -285,6 +370,7 @@ export class Orchestrator {
   snapshot(): RuntimeSnapshot {
     const now = this.#clock.nowMs();
     const running = [...this.#running.values()].map((entry) => ({
+      attempt_id: entry.attemptId,
       issue_id: entry.issue.id,
       issue_identifier: entry.issue.identifier,
       issue_url: entry.issue.url,
@@ -292,6 +378,7 @@ export class Orchestrator {
       session_id: entry.sessionId,
       pid: entry.pid,
       turn_count: entry.turnCount,
+      work_session_id: entry.workSessionId,
       last_event: entry.lastEvent,
       last_message: entry.lastMessage,
       started_at: iso(entry.startedAtMs),
@@ -305,7 +392,7 @@ export class Orchestrator {
         total_tokens: entry.lastTokens.totalTokens,
       },
     }));
-    const retrying = [...this.#retries.values()]
+    const localRetries = [...this.#retries.values()]
       .sort((left, right) => left.dueAtMs - right.dueAtMs)
       .map((entry) => ({
         issue_id: entry.issue.id,
@@ -316,6 +403,31 @@ export class Orchestrator {
         error: entry.error,
         kind: entry.kind,
       }));
+    const localRetrySessionIds = new Set(
+      [...this.#retries.values()].map((entry) => entry.workSessionId),
+    );
+    const durableRetries: RetrySnapshotRow[] = [];
+    for (const session of this.#stateStore.listActiveSessions()) {
+      if (
+        session.retry === null ||
+        session.origin.kind !== "tracker" ||
+        localRetrySessionIds.has(session.id)
+      ) {
+        continue;
+      }
+      durableRetries.push({
+        issue_id: session.origin.issueId,
+        issue_identifier: session.origin.issueIdentifier,
+        issue_url: session.origin.issueUrl,
+        attempt: session.retry.attempt,
+        due_at: session.retry.dueAt,
+        error: session.retry.error,
+        kind: session.retry.kind,
+      });
+    }
+    const retrying = [...localRetries, ...durableRetries].sort((left, right) =>
+      left.due_at.localeCompare(right.due_at),
+    );
     const activeSeconds = [...this.#running.values()].reduce(
       (sum, entry) => sum + Math.max(now - entry.startedAtMs, 0) / 1_000,
       0,
@@ -337,6 +449,10 @@ export class Orchestrator {
 
   async #performTick(): Promise<void> {
     await this.#reconcileRunning();
+    if (
+      !(await this.#reconcileExpiredRuntimeLeases(this.#workflowStore.current))
+    )
+      return;
     let dispatchAllowed = true;
     try {
       const preflight = await this.#workflowStore.checkForUpdates();
@@ -382,8 +498,11 @@ export class Orchestrator {
     if (!dispatchAllowed) return;
 
     for (const issue of [...observedIssues].sort(compareIssuesForDispatch)) {
-      if (!this.#hasGlobalSlot(workflow)) break;
       if (!this.#shouldDispatch(issue, workflow)) continue;
+      if (await this.#resumePersistedFreshHandoff(issue, tracker, workflow)) {
+        continue;
+      }
+      if (!this.#hasGlobalSlot(workflow)) break;
       if (!this.#hasStateSlot(issue, workflow)) continue;
       this.#dispatch(
         issue,
@@ -395,10 +514,73 @@ export class Orchestrator {
     }
   }
 
+  async #resumePersistedFreshHandoff(
+    issue: Issue,
+    tracker: TrackerAdapter,
+    workflow: WorkflowSnapshot,
+  ): Promise<boolean> {
+    let workSession;
+    try {
+      workSession = this.#stateStore.getTrackerSession(
+        workflow.config.tracker.kind,
+        repositoryIdentity(workflow),
+        issue.id,
+      );
+    } catch (error) {
+      this.#logger.error("dispatch outcome=skipped reason=state_read", {
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        error: errorMessage(error),
+      });
+      return true;
+    }
+    const retry = workSession?.retry;
+    if (workSession === null || retry?.kind !== "fresh_handoff") return false;
+    if (Date.parse(retry.dueAt) > this.#clock.nowMs()) return true;
+
+    try {
+      await this.#refuseFreshAttempt(
+        workSession.id,
+        workSession.controller.generation,
+        issue,
+        tracker,
+        workflow,
+        retry.error ?? "Fresh-attempt provisioning was refused",
+        retry.freshAttemptGeneration,
+      );
+      this.#release(
+        issue.id,
+        workSession.id,
+        workSession.controller.generation,
+      );
+    } catch (error) {
+      this.#logger.error(
+        "fresh_attempt_handoff outcome=failed reason=tracker_mutation",
+        {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          error: errorMessage(error),
+        },
+      );
+      this.#scheduleRetry(
+        issue,
+        workSession.id,
+        workSession.controller.generation,
+        retry.attempt + 1,
+        retry.error,
+        "fresh_handoff",
+        retry.freshAttemptGeneration,
+        workflow,
+      );
+    }
+    return true;
+  }
+
   async #startupCleanup(): Promise<void> {
     const workflow = this.#workflowStore.current;
     this.#observedTerminalIssueIds.clear();
     try {
+      await this.#reconcileExpiredRuntimeLeases(workflow);
       const tracker = this.#trackerFactory(workflow);
       const terminalIssues = await tracker.fetchIssuesByStates(
         workflow.config.tracker.terminalStates,
@@ -418,6 +600,45 @@ export class Orchestrator {
     }
   }
 
+  async #reconcileExpiredRuntimeLeases(
+    workflow: WorkflowSnapshot,
+  ): Promise<boolean> {
+    const now = iso(this.#clock.nowMs());
+    let candidates: readonly ExpiredRuntimeLeaseCandidate[];
+    try {
+      candidates = this.#stateStore.listExpiredRuntimeLeases(now);
+    } catch (error) {
+      this.#logger.error(
+        "dispatch outcome=skipped reason=lease_reconciliation",
+        { error: errorMessage(error) },
+      );
+      return false;
+    }
+    for (const candidate of candidates) {
+      try {
+        await this.#agentRunner.quiesceRuntime(workflow, {
+          workSessionId: candidate.sessionId,
+          controllerGeneration: candidate.controllerGeneration,
+        });
+        this.#stateStore.expireRuntimeLease({ ...candidate, now });
+        this.#logger.info("runtime_lease outcome=expired", {
+          work_session_id: candidate.sessionId,
+          attempt_id: candidate.attemptId,
+        });
+      } catch (error) {
+        this.#logger.error(
+          "runtime_lease outcome=retained reason=quiescence_unproven",
+          {
+            work_session_id: candidate.sessionId,
+            attempt_id: candidate.attemptId,
+            error: errorMessage(error),
+          },
+        );
+      }
+    }
+    return true;
+  }
+
   async #reconcileTerminalWorkspaces(
     issues: readonly Issue[],
     workflow: WorkflowSnapshot,
@@ -435,7 +656,48 @@ export class Orchestrator {
       ) {
         continue;
       }
-      await this.#cleanupWorkspace(issue, workflow, reason);
+      const workSession = this.#stateStore.getTrackerSession(
+        workflow.config.tracker.kind,
+        repositoryIdentity(workflow),
+        issue.id,
+      );
+      if (
+        workSession?.attempts.some(
+          (attempt) => attempt.runtimeLease.status === "active",
+        ) === true
+      ) {
+        this.#logger.info(
+          "workspace_cleanup outcome=skipped reason=active_runtime_lease",
+          {
+            issue_id: issue.id,
+            issue_identifier: issue.identifier,
+            work_session_id: workSession.id,
+          },
+        );
+        continue;
+      }
+      const cleaned = await this.#cleanupWorkspace(
+        issue,
+        workflow,
+        reason,
+        workSession === null
+          ? undefined
+          : {
+              workSessionId: workSession.id,
+              controllerGeneration: workSession.controller.generation,
+            },
+      );
+      if (!cleaned) {
+        terminalIssueIds.delete(issue.id);
+        continue;
+      }
+      if (workSession !== null) {
+        this.#markSessionTerminal(
+          workSession.id,
+          workSession.controller.generation,
+          issue,
+        );
+      }
     }
 
     this.#observedTerminalIssueIds.clear();
@@ -449,6 +711,28 @@ export class Orchestrator {
     const workflow = this.#workflowStore.current;
     const stallTimeoutMs = workflow.config.codex.stallTimeoutMs;
     const now = this.#clock.nowMs();
+
+    for (const entry of this.#running.values()) {
+      if (entry.terminationIntent !== null) continue;
+      try {
+        this.#stateStore.renewRuntimeLease({
+          sessionId: entry.workSessionId,
+          attemptId: entry.attemptId,
+          runtimeLeaseToken: entry.runtimeLeaseToken,
+          controllerGeneration: entry.controllerGeneration,
+          now: iso(now),
+          leaseExpiresAt: runtimeLeaseExpiresAt(now, entry.workflow),
+        });
+      } catch (error) {
+        this.#logger.error("runtime_lease outcome=lost", {
+          issue_id: entry.issue.id,
+          work_session_id: entry.workSessionId,
+          attempt_id: entry.attemptId,
+          error: errorMessage(error),
+        });
+        this.#terminate(entry, "released", "runtime lease lost");
+      }
+    }
 
     if (stallTimeoutMs > 0) {
       for (const entry of this.#running.values()) {
@@ -535,11 +819,59 @@ export class Orchestrator {
     tracker: TrackerAdapter,
     workflow: WorkflowSnapshot,
   ): void {
+    const startedAtMs = this.#clock.nowMs();
+    let started: StartedAttempt;
+    let effectiveAttempt = attempt;
+    let effectiveFreshGeneration = freshGeneration;
+    try {
+      const workSession = this.#stateStore.getOrCreateTrackerSession({
+        trackerKind: workflow.config.tracker.kind,
+        repositoryIdentity: repositoryIdentity(workflow),
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        issueUrl: issue.url,
+        intent: issue.title,
+        controllerId: trackerControllerId(workflow),
+        doctrine: null,
+        configuration:
+          workflow.config.deployment?.acceptedConfiguration ?? null,
+        now: iso(startedAtMs),
+      });
+      if (effectiveAttempt === null && workSession.retry !== null) {
+        effectiveAttempt = workSession.retry.attempt;
+        effectiveFreshGeneration =
+          workSession.retry.freshAttemptGeneration ?? freshGeneration;
+      }
+      started = this.#stateStore.startAttempt({
+        sessionId: workSession.id,
+        controllerGeneration: workSession.controller.generation,
+        holderId: this.#instanceId,
+        trackerAttempt: effectiveAttempt,
+        freshAttemptGeneration: effectiveFreshGeneration,
+        now: iso(startedAtMs),
+        leaseExpiresAt: runtimeLeaseExpiresAt(startedAtMs, workflow),
+      });
+    } catch (error) {
+      const log = expectedDispatchRefusal(error)
+        ? this.#logger.debug.bind(this.#logger)
+        : this.#logger.error.bind(this.#logger);
+      log("dispatch outcome=skipped reason=state_admission", {
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        error: errorMessage(error),
+        state_error:
+          error instanceof StateStoreError ? error.code : "unexpected",
+      });
+      return;
+    }
+
     const abortController = new AbortController();
     const entry: RunningEntry = {
       abortController,
-      attempt,
-      freshAttemptGeneration: freshGeneration,
+      attemptId: started.attemptId,
+      attempt: effectiveAttempt,
+      controllerGeneration: started.controllerGeneration,
+      freshAttemptGeneration: effectiveFreshGeneration,
       issue,
       lastEvent: null,
       lastEventAtMs: null,
@@ -548,11 +880,13 @@ export class Orchestrator {
       pid: null,
       seenTurnIds: new Set(),
       sessionId: null,
-      startedAtMs: this.#clock.nowMs(),
+      runtimeLeaseToken: started.runtimeLeaseToken,
+      startedAtMs,
       terminationError: null,
       terminationIntent: null,
       tracker,
       turnCount: 0,
+      workSessionId: started.session.id,
       worker: null,
       workflow,
     };
@@ -562,16 +896,26 @@ export class Orchestrator {
     this.#logger.info("dispatch outcome=started", {
       issue_id: issue.id,
       issue_identifier: issue.identifier,
-      attempt,
-      fresh_attempt_generation: freshGeneration,
+      work_session_id: entry.workSessionId,
+      attempt_id: entry.attemptId,
+      attempt: effectiveAttempt,
+      fresh_attempt_generation: effectiveFreshGeneration,
     });
 
     const runOptions: AgentRunOptions = {
-      attempt,
-      freshAttemptGeneration: freshGeneration,
+      attempt: effectiveAttempt,
+      freshAttemptGeneration: effectiveFreshGeneration,
       issue,
       onEvent: (event) =>
         this.#enqueue(() => this.#applyAgentEvent(issue.id, event)),
+      onWorkspace: (workspace) =>
+        this.#enqueue(() => this.#recordWorkspace(entry, workspace)),
+      repositoryAuthority: {
+        workSessionId: entry.workSessionId,
+        attemptId: entry.attemptId,
+        runtimeLeaseToken: entry.runtimeLeaseToken,
+        controllerGeneration: entry.controllerGeneration,
+      },
       signal: abortController.signal,
       tracker,
       workflow,
@@ -588,11 +932,82 @@ export class Orchestrator {
     );
   }
 
+  #recordWorkspace(entry: RunningEntry, workspace: Workspace): void {
+    if (entry.workflow.config.workspace.provider === "git-worktree") {
+      const session = this.#stateStore.getSession(entry.workSessionId);
+      const attempt = session?.attempts.find(
+        (candidate) => candidate.id === entry.attemptId,
+      );
+      const lease = attempt?.workspaceLease;
+      if (
+        lease?.mode !== "managed" ||
+        lease.phase !== "ready" ||
+        lease.path !== workspace.path ||
+        lease.workspaceKey !== workspace.workspaceKey
+      ) {
+        throw new StateStoreError(
+          "stale_fence",
+          `Attempt ${entry.attemptId} did not return its ready managed workspace`,
+        );
+      }
+      return;
+    }
+    this.#stateStore.recordWorkspace({
+      sessionId: entry.workSessionId,
+      attemptId: entry.attemptId,
+      runtimeLeaseToken: entry.runtimeLeaseToken,
+      controllerGeneration: entry.controllerGeneration,
+      mode: workspaceMode(entry.workflow),
+      path: workspace.path,
+      workspaceKey: workspace.workspaceKey,
+      now: iso(this.#clock.nowMs()),
+    });
+  }
+
   #applyAgentEvent(issueId: string, event: AgentEvent): void {
     const entry = this.#running.get(issueId);
     if (entry === undefined) return;
+    const now = this.#clock.nowMs();
+    try {
+      this.#stateStore.renewRuntimeLease({
+        sessionId: entry.workSessionId,
+        attemptId: entry.attemptId,
+        runtimeLeaseToken: entry.runtimeLeaseToken,
+        controllerGeneration: entry.controllerGeneration,
+        now: iso(now),
+        leaseExpiresAt: runtimeLeaseExpiresAt(now, entry.workflow),
+      });
+      if (
+        typeof event.codex_app_server_pid === "number" ||
+        (event.event === "session_started" &&
+          typeof event["session_id"] === "string")
+      ) {
+        this.#stateStore.recordRuntimeCorrelation({
+          sessionId: entry.workSessionId,
+          attemptId: entry.attemptId,
+          runtimeLeaseToken: entry.runtimeLeaseToken,
+          controllerGeneration: entry.controllerGeneration,
+          ...(typeof event.codex_app_server_pid === "number"
+            ? { processId: event.codex_app_server_pid }
+            : {}),
+          ...(typeof event["session_id"] === "string"
+            ? { sessionIdValue: event["session_id"] }
+            : {}),
+          now: iso(now),
+        });
+      }
+    } catch (error) {
+      this.#logger.error("runtime_lease outcome=lost", {
+        issue_id: entry.issue.id,
+        work_session_id: entry.workSessionId,
+        attempt_id: entry.attemptId,
+        error: errorMessage(error),
+      });
+      this.#terminate(entry, "released", "runtime lease lost");
+      return;
+    }
     entry.lastEvent = event.event;
-    entry.lastEventAtMs = this.#clock.nowMs();
+    entry.lastEventAtMs = now;
     entry.lastMessage = eventMessage(event);
 
     if (typeof event.codex_app_server_pid === "number") {
@@ -644,19 +1059,52 @@ export class Orchestrator {
       entry.issue = outcome.result.finalIssue;
     }
 
+    if (!this.#finishDurableAttempt(entry, outcome.error)) {
+      this.#release(entry.issue.id);
+      return;
+    }
+
     switch (entry.terminationIntent) {
       case "terminal":
-        await this.#cleanupWorkspace(entry.issue, entry.workflow, "terminal");
-        this.#release(entry.issue.id);
+        if (
+          await this.#cleanupWorkspace(
+            entry.issue,
+            entry.workflow,
+            "terminal",
+            {
+              workSessionId: entry.workSessionId,
+              controllerGeneration: entry.controllerGeneration,
+            },
+          )
+        ) {
+          this.#markSessionTerminal(
+            entry.workSessionId,
+            entry.controllerGeneration,
+            entry.issue,
+          );
+        } else {
+          this.#observedTerminalIssueIds.delete(entry.issue.id);
+        }
+        this.#release(
+          entry.issue.id,
+          entry.workSessionId,
+          entry.controllerGeneration,
+        );
         break;
       case "released":
       case "stopping":
-        this.#release(entry.issue.id);
+        this.#release(
+          entry.issue.id,
+          entry.workSessionId,
+          entry.controllerGeneration,
+        );
         break;
       case "stalled": {
         const attempt = nextFailureAttempt(entry.attempt);
         this.#scheduleRetry(
           entry.issue,
+          entry.workSessionId,
+          entry.controllerGeneration,
           attempt,
           entry.terminationError ?? "agent stalled",
           "failure",
@@ -669,6 +1117,8 @@ export class Orchestrator {
         if (outcome.error === null) {
           this.#scheduleRetry(
             entry.issue,
+            entry.workSessionId,
+            entry.controllerGeneration,
             1,
             null,
             "continuation",
@@ -680,12 +1130,19 @@ export class Orchestrator {
           const refusalReason = errorMessage(outcome.error);
           try {
             await this.#refuseFreshAttempt(
+              entry.workSessionId,
+              entry.controllerGeneration,
               entry.issue,
               entry.tracker,
               entry.workflow,
               refusalReason,
+              entry.freshAttemptGeneration,
             );
-            this.#release(entry.issue.id);
+            this.#release(
+              entry.issue.id,
+              entry.workSessionId,
+              entry.controllerGeneration,
+            );
           } catch (handoffError) {
             this.#logger.error(
               "fresh_attempt_handoff outcome=failed reason=tracker_mutation",
@@ -697,6 +1154,8 @@ export class Orchestrator {
             );
             this.#scheduleRetry(
               entry.issue,
+              entry.workSessionId,
+              entry.controllerGeneration,
               attempt,
               refusalReason,
               "fresh_handoff",
@@ -708,6 +1167,8 @@ export class Orchestrator {
           const attempt = nextFailureAttempt(entry.attempt);
           this.#scheduleRetry(
             entry.issue,
+            entry.workSessionId,
+            entry.controllerGeneration,
             attempt,
             errorMessage(outcome.error),
             "failure",
@@ -730,8 +1191,64 @@ export class Orchestrator {
     );
   }
 
+  #finishDurableAttempt(entry: RunningEntry, error: unknown | null): boolean {
+    if (
+      error instanceof SymphonyError &&
+      error.code === "runtime_quiescence_refused"
+    ) {
+      this.#logger.error(
+        "attempt outcome=retained reason=quiescence_unproven",
+        {
+          issue_id: entry.issue.id,
+          work_session_id: entry.workSessionId,
+          attempt_id: entry.attemptId,
+          error: error.message,
+        },
+      );
+      return false;
+    }
+    let status: Exclude<AttemptStatus, "running">;
+    switch (entry.terminationIntent) {
+      case "stalled":
+        status = "stalled";
+        break;
+      case "stopping":
+        status = "cancelled";
+        break;
+      case "released":
+      case "terminal":
+        status = "released";
+        break;
+      case null:
+        status = error === null ? "completed" : "failed";
+        break;
+    }
+    try {
+      this.#stateStore.finishAttempt({
+        sessionId: entry.workSessionId,
+        attemptId: entry.attemptId,
+        runtimeLeaseToken: entry.runtimeLeaseToken,
+        controllerGeneration: entry.controllerGeneration,
+        status,
+        error: error === null ? entry.terminationError : errorMessage(error),
+        now: iso(this.#clock.nowMs()),
+      });
+      return true;
+    } catch (stateError) {
+      this.#logger.error("attempt outcome=retained reason=state_write", {
+        issue_id: entry.issue.id,
+        work_session_id: entry.workSessionId,
+        attempt_id: entry.attemptId,
+        error: errorMessage(stateError),
+      });
+      return false;
+    }
+  }
+
   #scheduleRetry(
     issue: Issue,
+    workSessionId: string,
+    controllerGeneration: number,
     attempt: number,
     retryError: string | null,
     kind: RetryKind,
@@ -746,7 +1263,20 @@ export class Orchestrator {
             attempt,
             this.#workflowStore.current.config.agent.maxRetryBackoffMs,
           );
-    const dueAtMs = this.#clock.nowMs() + delayMs;
+    const nowMs = this.#clock.nowMs();
+    const dueAtMs = nowMs + delayMs;
+    this.#stateStore.scheduleRetry({
+      sessionId: workSessionId,
+      controllerGeneration,
+      retry: {
+        kind,
+        attempt,
+        dueAt: iso(dueAtMs),
+        error: retryError,
+        freshAttemptGeneration: freshGeneration,
+        recordedAt: iso(nowMs),
+      },
+    });
     const timer = this.#clock.setTimeout(() => {
       void this.#enqueue(() => this.#handleRetry(issue.id)).catch(
         (error: unknown) => {
@@ -761,12 +1291,14 @@ export class Orchestrator {
     this.#claimed.add(issue.id);
     this.#retries.set(issue.id, {
       attempt,
+      controllerGeneration,
       dueAtMs,
       error: retryError,
       freshAttemptGeneration: freshGeneration,
       issue,
       kind,
       timer,
+      workSessionId,
       workspaceWorkflow,
     });
     this.#logger.info("retry outcome=scheduled", {
@@ -791,6 +1323,8 @@ export class Orchestrator {
     } catch (error) {
       this.#scheduleRetry(
         retry.issue,
+        retry.workSessionId,
+        retry.controllerGeneration,
         retry.attempt,
         retry.kind === "fresh_handoff" ? retry.error : errorMessage(error),
         retry.kind === "fresh_handoff" ? "fresh_handoff" : "failure",
@@ -806,6 +1340,8 @@ export class Orchestrator {
     } catch (error) {
       this.#scheduleRetry(
         retry.issue,
+        retry.workSessionId,
+        retry.controllerGeneration,
         retry.attempt,
         retry.kind === "fresh_handoff" ? retry.error : errorMessage(error),
         retry.kind === "fresh_handoff" ? "fresh_handoff" : "failure",
@@ -817,20 +1353,32 @@ export class Orchestrator {
 
     const issue = refreshed.find((candidate) => candidate.id === issueId);
     if (issue === undefined) {
-      this.#release(issueId);
+      this.#release(issueId, retry.workSessionId, retry.controllerGeneration);
       return;
     }
     if (stateIncluded(issue.state, workflow.config.tracker.terminalStates)) {
-      await this.#cleanupWorkspace(
-        issue,
-        retry.workspaceWorkflow,
-        "retry_terminal",
-      );
-      this.#release(issueId);
+      if (
+        await this.#cleanupWorkspace(
+          issue,
+          retry.workspaceWorkflow,
+          "retry_terminal",
+          {
+            workSessionId: retry.workSessionId,
+            controllerGeneration: retry.controllerGeneration,
+          },
+        )
+      ) {
+        this.#markSessionTerminal(
+          retry.workSessionId,
+          retry.controllerGeneration,
+          issue,
+        );
+      }
+      this.#release(issueId, retry.workSessionId, retry.controllerGeneration);
       return;
     }
     if (!issueEligibleByConfig(issue, workflow.config)) {
-      this.#release(issueId);
+      this.#release(issueId, retry.workSessionId, retry.controllerGeneration);
       return;
     }
     const remainsFresh = issueInFreshAttemptState(issue, workflow);
@@ -838,7 +1386,7 @@ export class Orchestrator {
       ? generationForIssue(issue, workflow)
       : retry.freshAttemptGeneration;
     if (remainsFresh && generation !== retry.freshAttemptGeneration) {
-      this.#release(issueId);
+      this.#release(issueId, retry.workSessionId, retry.controllerGeneration);
       if (
         this.#hasGlobalSlot(workflow) &&
         this.#hasStateSlot(issue, workflow)
@@ -849,17 +1397,20 @@ export class Orchestrator {
     }
     if (retry.kind === "fresh_handoff") {
       if (!remainsFresh) {
-        this.#release(issueId);
+        this.#release(issueId, retry.workSessionId, retry.controllerGeneration);
         return;
       }
       try {
         await this.#refuseFreshAttempt(
+          retry.workSessionId,
+          retry.controllerGeneration,
           issue,
           tracker,
           workflow,
           retry.error ?? "Fresh-attempt provisioning was refused",
+          generation,
         );
-        this.#release(issueId);
+        this.#release(issueId, retry.workSessionId, retry.controllerGeneration);
       } catch (error) {
         this.#logger.error(
           "fresh_attempt_handoff outcome=failed reason=tracker_mutation",
@@ -871,6 +1422,8 @@ export class Orchestrator {
         );
         this.#scheduleRetry(
           issue,
+          retry.workSessionId,
+          retry.controllerGeneration,
           retry.attempt + 1,
           retry.error,
           "fresh_handoff",
@@ -886,6 +1439,8 @@ export class Orchestrator {
     ) {
       this.#scheduleRetry(
         issue,
+        retry.workSessionId,
+        retry.controllerGeneration,
         retry.attempt,
         "no available orchestrator slots",
         "failure",
@@ -898,10 +1453,13 @@ export class Orchestrator {
   }
 
   async #refuseFreshAttempt(
+    workSessionId: string,
+    controllerGeneration: number,
     issue: Issue,
     tracker: TrackerAdapter,
     workflow: WorkflowSnapshot,
     reason: string,
+    generation: string | null,
   ): Promise<void> {
     const failureState = workflow.config.tracker.freshAttemptFailureState;
     if (failureState === null) {
@@ -911,10 +1469,42 @@ export class Orchestrator {
     if (control === undefined) {
       throw new Error("Tracker adapter has no fresh-attempt refusal control");
     }
+    const effect = this.#stateStore.enqueueEffect({
+      sessionId: workSessionId,
+      controllerGeneration,
+      kind: "tracker.fresh_attempt_refusal",
+      idempotencyKey: [
+        "fresh-attempt-refusal",
+        issue.id,
+        generation ?? "no-generation",
+      ].join(":"),
+      payload: {
+        issue_id: issue.id,
+        reason,
+        failure_state: failureState.trim(),
+      },
+      now: iso(this.#clock.nowMs()),
+    });
+    if (effect.status === "failed") {
+      throw new StateStoreError(
+        "effect_conflict",
+        `Fresh-attempt refusal effect ${effect.id} is terminally failed`,
+      );
+    }
+    if (effect.status === "applied") return;
+
     await control.refuse(reason, failureState);
+    this.#stateStore.finishEffect({
+      effectId: effect.id,
+      controllerGeneration,
+      status: "applied",
+      result: { failure_state: failureState.trim() },
+      now: iso(this.#clock.nowMs()),
+    });
     this.#logger.info("fresh_attempt_handoff outcome=completed", {
       issue_id: issue.id,
       issue_identifier: issue.identifier,
+      effect_id: effect.id,
       target_state: failureState,
     });
   }
@@ -967,14 +1557,16 @@ export class Orchestrator {
     issue: Issue,
     workflow: WorkflowSnapshot,
     reason: string,
-  ): Promise<void> {
+    authority?: RepositoryCleanupAuthority,
+  ): Promise<boolean> {
     try {
-      await this.#agentRunner.cleanupWorkspace(issue, workflow);
+      await this.#agentRunner.cleanupWorkspace(issue, workflow, authority);
       this.#logger.info("workspace_cleanup outcome=completed", {
         issue_id: issue.id,
         issue_identifier: issue.identifier,
         reason,
       });
+      return true;
     } catch (error) {
       this.#logger.warn("workspace_cleanup outcome=failed", {
         issue_id: issue.id,
@@ -982,12 +1574,62 @@ export class Orchestrator {
         reason,
         error: errorMessage(error),
       });
+      return false;
     }
   }
 
-  #release(issueId: string): void {
+  #markSessionTerminal(
+    workSessionId: string,
+    controllerGeneration: number,
+    issue: Issue,
+  ): void {
+    try {
+      this.#stateStore.markSessionTerminal(
+        workSessionId,
+        controllerGeneration,
+        normalizedTrackerValue(issue.state) === "cancelled"
+          ? "cancelled"
+          : "completed",
+        iso(this.#clock.nowMs()),
+      );
+    } catch (error) {
+      this.#logger.error(
+        "work_session outcome=retained reason=terminal_write",
+        {
+          issue_id: issue.id,
+          work_session_id: workSessionId,
+          error: errorMessage(error),
+        },
+      );
+    }
+  }
+
+  #release(
+    issueId: string,
+    workSessionId?: string,
+    controllerGeneration?: number,
+  ): void {
+    const retryEntry = this.#retries.get(issueId);
+    const retrySessionId = retryEntry?.workSessionId;
+    const retryControllerGeneration = retryEntry?.controllerGeneration;
     this.#cancelRetry(issueId);
     this.#claimed.delete(issueId);
+    const sessionId = workSessionId ?? retrySessionId;
+    const generation = controllerGeneration ?? retryControllerGeneration;
+    if (sessionId === undefined || generation === undefined) return;
+    try {
+      this.#stateStore.clearRetry(
+        sessionId,
+        generation,
+        iso(this.#clock.nowMs()),
+      );
+    } catch (error) {
+      this.#logger.error("retry outcome=retained reason=state_write", {
+        issue_id: issueId,
+        work_session_id: sessionId,
+        error: errorMessage(error),
+      });
+    }
   }
 
   #cancelRetry(issueId: string): void {

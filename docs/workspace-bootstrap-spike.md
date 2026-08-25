@@ -1,12 +1,15 @@
 # Workspace bootstrap spike — 2026-08-23
 
+Status: historical feasibility evidence; its repository-harness ownership conclusion is superseded
+by [`repository-driver-boundary.md`](repository-driver-boundary.md)
+
 ## Question map
 
 ```text
 configurable root? ── yes ─┐
-empty target accepted? ─ yes ─┼── the hook-based worktree design is viable
+empty target accepted? ─ yes ─┼── Symphony can own a Git-worktree driver
 fresh worktree adoptable? yes ┘
-directory key = branch? no ───── keep branch policy in the repository harness
+directory key = branch? no ───── keep separate path and branch contracts in Symphony
 ```
 
 ## Evidence
@@ -34,25 +37,28 @@ SPIKE_RESULT branch=symphony-spike/SYM-123 lane=1 registered_worktrees=2
 
 This proves that Git accepts an already-existing empty destination and that `core` adoption accepts
 a worktree registered only seconds earlier. `--adopt` also records the lane before returning, so a
-subsequent allocator can observe ownership.
+subsequent allocator can observe ownership. The evidence supports a central Git-worktree driver;
+it does not require each target repository to implement that driver.
 
 ## Design consequences
 
-The result validates the filesystem window, not the original hook command. An `after_create` hook
-runs in the empty workspace, so bare `pnpm harness:prepare` has no package manifest from which to
-resolve the script. The bootstrap command must address a repository-owned entry point through a
-generic environment variable while retaining the empty workspace as `cwd`.
+The result validates the filesystem window, not the original hook command. In the current
+compatibility path an `after_create` hook runs in the empty workspace, so bare
+`pnpm harness:prepare` has no package manifest from which to resolve the script. That observation
+explains the legacy explicit entry point; it is no longer a recommendation for new integrations.
 
 Workspace keys and branches also require separate contracts. Symphony permits `[A-Za-z0-9._-]` in
 directory keys, while Git rejects some sequences composed entirely of those characters, such as
-`..` and a `.lock` suffix. Symphony owns only the deterministic directory key. The repository
-harness owns branch naming, fetch/base-SHA selection, allocation, and its durable receipt.
+`..` and a `.lock` suffix. The target adapter may declare branch policy, but Symphony must own both
+safe name generation and the resulting durable lifecycle record.
 
-The implemented `workspace.provider: harness` mode follows that ownership through teardown. It
-requires `after_create` and `before_remove`; the latter must remove the workspace itself. If it
-fails or leaves any entry at the path, Symphony logs and retains that entry instead of applying a
-generic recursive delete. The default `directory` provider retains the core-spec behavior in which
-Symphony deletes the contained directory after the non-fatal `before_remove` hook.
+The implemented `workspace.provider: harness` mode remains compatibility behavior. It requires
+`after_create` and `before_remove`; the latter must remove the workspace itself. If it fails or
+leaves any entry at the path, Symphony logs and retains that entry instead of applying a generic
+recursive delete. The Symphony-owned Git-worktree driver now preserves that safe
+refusal while moving implementation and lease authority out of the target repository. Real-Git
+fixtures cover allocation-before-effect, recovery, generation replacement, and guarded removal;
+protected proof and a real product pilot remain separate evidence.
 
 ## What this spike does not prove
 

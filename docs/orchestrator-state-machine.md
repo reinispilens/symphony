@@ -1,50 +1,58 @@
 # Orchestrator state machine
 
+> [!IMPORTANT]
+> This document describes the durable-state implementation introduced with this change. The
+> [`repository-driver boundary`](repository-driver-boundary.md) is implemented for managed Git
+> worktrees; repository hooks and receipts below are compatibility behavior only.
+
 ## The control loop in one picture
 
 ```text
-                    tracker refresh
-                          │
-                          ▼
-Unclaimed ──claim──▶ Running ──normal exit──▶ Retry queued (1 second)
-    ▲                   │  │                         │
-    │                   │  └──failure/stall─────────┤ exponential delay
-    │                   │                            │
-    │                   ├──terminal──▶ cleanup ──────┤
-    │                   └──non-active/missing────────┤ no cleanup
-    │                                                │
-    └──────────────────── release ◀──── refresh ─────┘
+                       tracker refresh
+                             │
+                             ▼
+Unclaimed ──transaction──▶ fenced Attempt ──normal exit──▶ durable Retry (1s)
+    ▲                         │    │                              │
+    │                         │    └──failure/stall──────────────┤ backoff
+    │                         │                                   │
+    │                         ├──terminal──▶ driver cleanup ──────┤
+    │                         └──non-active/missing───────────────┤ retain
+    │                                                             │
+    └────────────────────── release ◀──────── refresh/timer ───────┘
 
 Released + inactive ──later terminal poll──▶ guarded cleanup
 
-All arrows that mutate claims, running entries, retries, or totals pass through one
-serialized authority.
+The complete WorkSession aggregate + effect intents live in SQLite.
+In-memory claims, workers, and timers are projections.
 ```
 
 Fresh-attempt states add one guarded preflight before `Running`:
 
 ```text
-state entry version ──▶ generation receipt ──▶ repository reset ──▶ workpad delete
-                              │                                         │
-                    matching ready: reuse                         success: Codex
-                              │                                         │
-                              └──── refusal: blocker + human handoff ◀──┘
+state entry version ──▶ durable generation + managed lease ──▶ guarded replacement
+                                 │                                  │
+                       matching ready: reuse              workpad delete + Codex
+                                 │                                  │
+                                 └── refusal: outboxed blocker/handoff
 ```
 
 The tracker state and the orchestration state answer different questions. A Project status such as
-`Todo` or `Human Review` says whether humans authorize work. An orchestration state says whether
-this process currently owns a claim, worker, or retry timer. Conflating the two would make a clean
+`Todo` or `Human Review` says whether humans authorize work. An orchestration state says whether the
+WorkSession currently owns a runtime lease or retry intent. Conflating the two would make a clean
 Codex turn look like completed project work, even though the card may still be active.
 
-The `Orchestrator` is the only mutable scheduling authority. Network reads and agent processes may
-be concurrent, but every resulting state mutation is queued behind one promise chain. Claiming
-happens synchronously before a worker promise is launched, so overlapping ticks, reload callbacks,
-worker events, and retry timers cannot dispatch the same opaque issue ID twice.
+The `Orchestrator` is the only application component that requests scheduling transitions. Network
+reads and agent processes may be concurrent, but durable mutations use immediate SQLite
+transactions. Claiming creates or recovers the WorkSession and atomically acquires one runtime
+lease before a worker promise is launched. The promise chain still serializes one process; the
+database lease also rejects a second daemon process.
 
 ## Tick order and eligibility
 
-Every poll tick first reconciles existing workers, validates the workflow, then makes one state-list
-read for the union of active and terminal states. Newly observed unclaimed terminal items go to
+Every poll tick first reconciles existing workers, then processes expired runtime-lease candidates.
+For each candidate it must prove the matching descendant scope quiescent before committing the
+fenced expiry; one unproven lease is retained and blocks new dispatch for that tick. The loop then
+validates its pinned/compatibility source and makes one state-list read for the union of active and terminal states. Newly observed unclaimed terminal items go to
 guarded cleanup even when workflow validation blocks new dispatch. Active candidates are sorted by
 valid `P0..P3` priority, oldest creation time, and identifier. A card is dispatched only when all of
 these independent gates agree:
@@ -54,7 +62,7 @@ these independent gates agree:
 | Project scope/routing | tracker adapter         | exact repository, open issue, visible active Project status |
 | state                 | workflow + orchestrator | active and not terminal                                     |
 | labels                | workflow + orchestrator | every required and no excluded label matches                |
-| ownership             | orchestrator            | neither running nor already claimed                         |
+| ownership             | WorkSession store       | no active runtime lease or incompatible durable retry       |
 | capacity              | orchestrator            | global and normalized per-state slots are both available    |
 
 The adapter's `dispatchable` flag is deliberately not a second scheduler. It records facts that
@@ -63,9 +71,13 @@ generic, so adding a future adapter does not reproduce orchestration policy.
 
 ## Worker and continuation lifecycle
 
-A worker receives an immutable workflow and tracker snapshot for the attempt. It creates or reuses
-the workspace, runs `before_run`, renders the strict prompt, and starts one Codex app-server
-process/thread. As long as ID refresh shows that the card is still active and routable, the runner
+A worker receives an immutable workflow/tracker snapshot plus fenced Attempt authority. The
+RepositoryDriver creates or recovers its workspace; the PreparationDriver records and performs any
+dependency setup; legacy `before_run` executes only on compatibility drivers. The runner then
+renders the strict prompt and starts one Codex app-server process/thread. For a managed worktree it
+uses exact operator-pinned Codex/systemd executables, creates one private state-root runtime temp,
+launches the app server in a deterministic user scope, and supplies Symphony's exact no-network
+per-turn write policy; repository configuration and user-wide writable roots cannot widen it. As long as ID refresh shows that the card is still active and routable, it
 may send continuation guidance on the same thread up to `agent.max_turns`.
 
 When that worker exits cleanly, the orchestrator schedules a fixed one-second continuation retry.
@@ -76,11 +88,13 @@ starts at attempt 1 and uses:
 delay = min(10 seconds × 2^(attempt - 1), agent.max_retry_backoff_ms)
 ```
 
-The retry entry retains the issue, attempt, due time, failure reason, retry kind, and the workflow
-snapshot that owns its existing workspace. Fresh entries also retain their generation. When its timer fires, the issue is refreshed by opaque
-ID. Terminal work is cleaned, missing or unroutable work is released, and eligible work is
-redispatched if both capacity limits permit it. Slot exhaustion becomes an explicit retry reason
-rather than dropping the claim.
+The durable retry entry retains the attempt counter, due/recorded times, failure reason, retry kind,
+and fresh generation beneath the WorkSession. The in-memory timer and issue/workflow snapshot are
+wake-up conveniences for retries scheduled by this process. After restart, ordinary polls read the
+durable retry and cannot admit it before its recorded due time. When a timer or eligible poll fires,
+the issue is refreshed by opaque ID. Terminal work is cleaned, missing or
+unroutable work is released, and eligible work is redispatched if both capacity limits permit it.
+Slot exhaustion becomes an explicit durable retry reason rather than dropping the claim.
 
 A changed fresh-state generation invalidates the old worker or retry. A `fresh_handoff` retry is a
 separate kind: it may repeat only the tracker blocker/status mutation and can never launch Codex.
@@ -114,26 +128,39 @@ inside the serialized authority.
 
 Normal terminal reconciliation is deliberately separate from the running table. It skips any item
 that is still claimed, because the worker/retry lifecycle must finish cancellation before cleanup.
-For an unclaimed newly terminal item, it invokes the same workspace cleanup port used by startup
-and active-run reconciliation. The workspace manager still delegates harness teardown to
-`before_remove`; Symphony never substitutes generic deletion when that repository hook refuses.
+For an unclaimed newly terminal item, it invokes the same repository-driver cleanup port used by
+startup and active-run reconciliation. In the compatibility provider, that driver still delegates
+harness teardown to `before_remove`; Symphony never substitutes generic deletion when that hook
+refuses. New repository integrations use the managed Git-worktree driver, which requires its
+durable lease, matching controller generation, no active runtime lease, and matching independent
+Git/filesystem evidence.
 
 Cancellation is cooperative at the runner boundary and forceful at the process boundary. The
-runner closes the live app-server session and still executes `after_run`; the process transport
-terminates its process group and escalates after a bounded grace period. A terminal transition then
+runner closes the live app-server session; the process transport terminates its ordinary process
+group, then the managed boundary signals and observes every process in the deterministic systemd
+cgroup. It escalates TERM to KILL after a bounded grace period. Only a proven empty cgroup permits
+private-runtime cleanup and terminal Attempt/lease release; otherwise the lease remains active for
+reconciliation. Compatibility `after_run` still executes. A terminal transition then
 invokes workspace cleanup. A non-active or invisible transition does not, because the repository
 may need that durable workspace when a human sends the card back.
 
 ## Restart and observability
 
-There is no required orchestration database. Normal polls derive newly terminal transitions from
-the current and preceding successful terminal sets. At startup, every terminal tracker item is
-swept through workspace cleanup, active items become ordinary candidates again, and
-repository-owned receipts inside workspaces preserve external resource knowledge. Retry timers,
-the preceding terminal set, and live session metadata are not persisted, so process restart
-recovery remains tracker- and filesystem-derived.
+`<stateRoot>/state.sqlite` owns managed WorkSessions, accepted configuration/doctrine,
+plans/decisions, session-level human attachments, attempts, runtime/workspace leases, preparation
+outcomes, retries, materialization/proof/delivery state, and external-effect intents. Human
+attachments are never Attempt workspace leases and are therefore outside every cleanup path. At
+startup, versioned document migrations run transactionally. Expired timestamps nominate leases for
+quiescence; they become interrupted only after the process boundary proves their descendant scope
+empty. Durable retry due times remain authoritative to normal-poll admission, and pending effects remain
+discoverable when their owning Git/tracker path is revisited. Every
+terminal tracker item is swept through its selected cleanup driver. Git/filesystem/tracker facts are
+still observed from their owners, but observation cannot manufacture missing Symphony cleanup
+authority. Compatibility deployments retain the older workspace-root state location, and legacy
+receipts remain readable only for compatibility resources.
 
-The read-only snapshot is a view of this same state, never a second authority. It contains running
-rows, retry rows, turn/session data, absolute-token aggregates, live plus ended runtime seconds,
-and the most recent rate-limit payload. JSON logs carry stable action/outcome messages and the issue
-and session context needed to correlate a transition.
+The read-only snapshot is a projection of durable WorkSession facts plus live process telemetry,
+never a second authority. It contains WorkSession/Attempt IDs, running rows, durable retry rows,
+turn/runtime correlation, absolute-token aggregates, live plus ended runtime seconds, and the most
+recent rate-limit payload. JSON logs carry stable action/outcome messages and the identities needed
+to correlate a transition.

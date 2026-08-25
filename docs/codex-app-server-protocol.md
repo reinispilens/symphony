@@ -12,11 +12,14 @@ Symphony parent (tracker credentials)
        └── scrubbed child environment
                     │
                     ▼
-             bash -lc <codex.command>
-                    │ stdio JSONL
-                    ▼
+       compatibility                 managed deployment
+ bash -lc <codex.command>      deterministic systemd user scope
+                                      │ exact codex app-server
+             └───────────────┬────────┘
+                             │ stdio JSONL
+                             ▼
  initialize → thread/start → turn/start → streamed events → turn/completed
-                         same process + thread for continuation turns
+                         same app server + thread for continuation turns
 ```
 
 Symphony targets Codex CLI `0.147.0`. The experimental generated v2 schema has SHA-256
@@ -40,10 +43,12 @@ touches.
 
 ## Lifecycle and transport
 
-The client launches exactly `bash -lc <codex.command>` with the issue workspace as `cwd`. Stdout is
-the newline-delimited JSON protocol; stderr is diagnostic-only and is never parsed as protocol. An
-input or output line is bounded to 10 MiB by default. A malformed or oversized stdout line is a
-protocol failure, not a log message.
+The compatibility client launches `bash -lc <codex.command>`. Managed Git instead launches the
+operator-pinned executable as `codex app-server` through `systemd-run --user --scope` with no login
+shell and with systemd environment expansion disabled. Both use the issue workspace as `cwd`.
+Stdout is the newline-delimited JSON protocol; stderr is diagnostic-only and is never parsed as
+protocol. An input or output line is bounded to 10 MiB by default. A malformed or oversized stdout
+line is a protocol failure, not a log message.
 
 One connection sends `initialize`, then the parameterless `initialized` notification. It creates a
 thread with `thread/start`, attaches the issue identity through `thread/name/set`, and starts each
@@ -57,11 +62,25 @@ malformed JSONL, and an unavailable command have separate error codes.
 
 ## Unattended policy
 
-The effective defaults are approval policy `never` and thread sandbox `workspace-write`. A workflow
-may supply protocol-native overrides through `codex.approval_policy`, `codex.thread_sandbox`, and
-`codex.turn_sandbox_policy`. If Codex nevertheless sends a command or file approval request,
-Symphony responds `acceptForSession` (`approved_for_session` for the legacy request variants) so the
-run cannot hang.
+Compatibility workspace modes default to approval policy `never` and thread sandbox
+`workspace-write`, while retaining protocol-native workflow overrides through
+`codex.approval_policy`, `codex.thread_sandbox`, and `codex.turn_sandbox_policy`.
+
+A Symphony-managed Git worktree is stricter. Its product profile cannot replace the Codex command
+or weaken approvals, sandboxing, or process containment. The operator binding pins exact Codex,
+`systemd-run`, and `systemctl` executables outside product/state/workspace roots. Symphony sends
+`never` plus `workspace-write`. Every turn receives an explicit
+`workspaceWrite` policy with network and ambient temp roots disabled. The only additional writable
+root is a private temp directory under Symphony state for that runtime lease; Symphony supplies it
+as `TMPDIR`/`TMP`/`TEMP` and removes it after the run or guarded WorkSession cleanup. A linked
+worktree can therefore edit its files but cannot update the trusted source repository's shared Git
+metadata merely because an operator has broad user-wide Codex writable roots. App-server exit is
+not terminal proof: Symphony terminates and observes every process in the deterministic
+WorkSession/controller cgroup before releasing the runtime lease. A failed observation retains the
+lease and blocks replacement.
+
+If Codex nevertheless sends a command or file approval request, Symphony responds
+`acceptForSession` (`approved_for_session` for the legacy request variants) so the run cannot hang.
 
 An `item/permissions/requestApproval` request is a different boundary: it asks Symphony to expand
 the active filesystem or network permissions. Symphony grants an empty permission set for the

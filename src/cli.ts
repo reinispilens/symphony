@@ -1,26 +1,46 @@
 #!/usr/bin/env node
 
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { AgentRunner } from "./agent/runner.js";
-import { errorMessage } from "./errors.js";
+import { resolveDeploymentBinding } from "./deployment/resolver.js";
+import { errorMessage, SymphonyError } from "./errors.js";
 import { JsonLineLogger, type Logger } from "./observability/logger.js";
+import { RoutingPreparationDriver } from "./preparation/driver.js";
+import { PnpmPreparationDriver } from "./preparation/pnpm-driver.js";
+import {
+  GitWorktreeRepositoryDriver,
+  preflightManagedGitHost,
+} from "./repository/git-worktree-driver.js";
+import { RoutingRepositoryDriver } from "./repository/routing-driver.js";
 import {
   Orchestrator,
   type RuntimeSnapshot,
+  type WorkflowSource,
 } from "./orchestrator/orchestrator.js";
+import {
+  SqliteSymphonyStateStore,
+  stateDatabasePath,
+  stateDatabasePathFromStateRoot,
+} from "./state/sqlite-store.js";
 import { DefaultTrackerFactory } from "./tracker/factory.js";
 import {
   GITHUB_PROJECTS_TRACKER_KIND,
   githubProjectsConfigProfile,
 } from "./tracker/github-projects/profile.js";
 import { selectWorkflowPath } from "./workflow/loader.js";
-import { WorkflowStore } from "./workflow/store.js";
+import { PinnedWorkflowStore, WorkflowStore } from "./workflow/store.js";
+import { WorkspaceManager } from "./workspace/manager.js";
 import { SYMPHONY_VERSION } from "./version.js";
 
 const USAGE = `Usage: symphony [path-to-WORKFLOW.md]
+       symphony --binding path-to-deployment-binding.json
 
-Run one long-lived Symphony daemon for one repository workflow.
+Run one long-lived Symphony daemon for one repository binding or compatibility workflow.
+
+Managed deployments use an operator-owned binding. Positional WORKFLOW.md is
+the compatibility path for existing directory/harness consumers.
 
 Options:
   -h, --help       Show this help
@@ -30,7 +50,16 @@ Options:
 type CliArguments =
   | { readonly action: "help" }
   | { readonly action: "version" }
-  | { readonly action: "run"; readonly workflowPath: string | undefined };
+  | {
+      readonly action: "run";
+      readonly source:
+        | { readonly kind: "binding"; readonly path: string }
+        | { readonly kind: "workflow"; readonly path: string | undefined };
+    };
+
+export type DaemonSource =
+  | { readonly kind: "binding"; readonly path: string }
+  | { readonly kind: "workflow"; readonly path: string };
 
 export interface DaemonHost {
   snapshot(): RuntimeSnapshot;
@@ -41,7 +70,7 @@ export interface DaemonHost {
 export interface DaemonHostFactoryOptions {
   readonly environment: NodeJS.ProcessEnv;
   readonly logger: Logger;
-  readonly workflowPath: string;
+  readonly source: DaemonSource;
 }
 
 export type DaemonHostFactory = (
@@ -60,7 +89,9 @@ export interface CliDependencies {
 
 export function parseCliArguments(argv: readonly string[]): CliArguments {
   let workflowPath: string | undefined;
-  for (const argument of argv) {
+  let bindingPath: string | undefined;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]!;
     if (argument === "-h" || argument === "--help") {
       if (argv.length !== 1)
         throw new Error("--help cannot be combined with other arguments");
@@ -72,6 +103,18 @@ export function parseCliArguments(argv: readonly string[]): CliArguments {
       }
       return { action: "version" };
     }
+    if (argument === "--binding") {
+      if (bindingPath !== undefined) {
+        throw new Error("--binding may be specified only once");
+      }
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("-")) {
+        throw new Error("--binding requires a path");
+      }
+      bindingPath = value;
+      index += 1;
+      continue;
+    }
     if (argument.startsWith("-")) {
       throw new Error(`unknown option '${argument}'`);
     }
@@ -80,7 +123,16 @@ export function parseCliArguments(argv: readonly string[]): CliArguments {
     }
     workflowPath = argument;
   }
-  return { action: "run", workflowPath };
+  if (bindingPath !== undefined && workflowPath !== undefined) {
+    throw new Error("--binding cannot be combined with a workflow path");
+  }
+  return {
+    action: "run",
+    source:
+      bindingPath === undefined
+        ? { kind: "workflow", path: workflowPath }
+        : { kind: "binding", path: bindingPath },
+  };
 }
 
 export async function buildDaemonHost(
@@ -90,37 +142,99 @@ export async function buildDaemonHost(
   const trackerProfiles = new Map([
     [GITHUB_PROJECTS_TRACKER_KIND, githubProjectsConfigProfile],
   ]);
-  const workflowStore = new WorkflowStore({
-    workflowPath: options.workflowPath,
-    trackerProfiles,
-    environment: options.environment,
-    logger: options.logger,
-    onReload: () => {
-      void orchestrator?.tick().catch((error: unknown) => {
-        options.logger.error("workflow_reapply outcome=failed", {
-          error: errorMessage(error),
-          workflow_path: options.workflowPath,
+  let workflowStore: WorkflowSource;
+  if (options.source.kind === "binding") {
+    const deployment = await resolveDeploymentBinding({
+      bindingPath: options.source.path,
+      trackerProfiles,
+      environment: options.environment,
+    });
+    workflowStore = new PinnedWorkflowStore(deployment.workflow);
+  } else {
+    const reloadable = new WorkflowStore({
+      workflowPath: options.source.path,
+      trackerProfiles,
+      environment: options.environment,
+      logger: options.logger,
+      onReload: () => {
+        void orchestrator?.tick().catch((error: unknown) => {
+          options.logger.error("workflow_reapply outcome=failed", {
+            error: errorMessage(error),
+            workflow_path: options.source.path,
+          });
         });
-      });
-    },
-  });
-  await workflowStore.loadInitial();
+      },
+    });
+    await reloadable.loadInitial();
+    workflowStore = reloadable;
+    if (workflowStore.current.config.workspace.provider === "git-worktree") {
+      workflowStore.close();
+      throw new SymphonyError(
+        "deployment_binding_refused",
+        "Managed Git worktrees require an operator-owned deployment binding; positional WORKFLOW.md is compatibility-only",
+      );
+    }
+  }
 
   const trackerFactory = new DefaultTrackerFactory({
     environment: options.environment,
     logger: options.logger,
   });
   trackerFactory.create(workflowStore.current);
-  orchestrator = new Orchestrator({
-    agentRunner: new AgentRunner({
+  await preflightManagedGitHost({
+    deployment: workflowStore.current.config.deployment,
+    repository: workflowStore.current.config.repository,
+    workflowPath: workflowStore.current.path,
+    workspace: workflowStore.current.config.workspace,
+  });
+  const stateStore = SqliteSymphonyStateStore.open(
+    workflowStore.current.config.deployment === null
+      ? stateDatabasePath(workflowStore.current.config.workspace.root)
+      : stateDatabasePathFromStateRoot(
+          workflowStore.current.config.deployment.stateRoot,
+        ),
+  );
+  const repositoryDriver = new RoutingRepositoryDriver({
+    compatibility: new WorkspaceManager({
       logger: options.logger,
       processEnvironment: options.environment,
     }),
+    managedGit: new GitWorktreeRepositoryDriver({
+      logger: options.logger,
+      stateStore,
+    }),
+  });
+  const preparationDriver = new RoutingPreparationDriver({
+    pnpm: new PnpmPreparationDriver({
+      logger: options.logger,
+      processEnvironment: options.environment,
+      stateStore,
+    }),
+  });
+  const hostOrchestrator = new Orchestrator({
+    agentRunner: new AgentRunner({
+      logger: options.logger,
+      preparationDriver,
+      processEnvironment: options.environment,
+      repositoryDriver,
+    }),
     logger: options.logger,
+    stateStore,
     trackerFactory: (workflow) => trackerFactory.create(workflow),
     workflowStore,
   });
-  return orchestrator;
+  orchestrator = hostOrchestrator;
+  return {
+    snapshot: () => hostOrchestrator.snapshot(),
+    start: () => hostOrchestrator.start(),
+    stop: async () => {
+      try {
+        await hostOrchestrator.stop();
+      } finally {
+        stateStore.close();
+      }
+    },
+  };
 }
 
 function waitForProcessSignal(): Promise<string> {
@@ -163,15 +277,22 @@ export async function runCli(
   const cwd = dependencies.cwd ?? process.cwd();
   const environment = dependencies.environment ?? process.env;
   const logger = dependencies.logger ?? new JsonLineLogger();
-  const workflowPath = selectWorkflowPath(parsed.workflowPath, cwd);
+  const source: DaemonSource =
+    parsed.source.kind === "binding"
+      ? { kind: "binding", path: path.resolve(cwd, parsed.source.path) }
+      : {
+          kind: "workflow",
+          path: selectWorkflowPath(parsed.source.path, cwd),
+        };
   const hostFactory = dependencies.hostFactory ?? buildDaemonHost;
   let host: DaemonHost | null = null;
   try {
-    host = await hostFactory({ environment, logger, workflowPath });
+    host = await hostFactory({ environment, logger, source });
     await host.start();
     logger.info("service outcome=started", {
       pid: process.pid,
-      workflow_path: workflowPath,
+      configuration_kind: source.kind,
+      configuration_path: source.path,
     });
     const signal = await (
       dependencies.waitForShutdown ?? waitForProcessSignal
@@ -183,7 +304,8 @@ export async function runCli(
   } catch (error) {
     logger.error("service outcome=failed", {
       error: errorMessage(error),
-      workflow_path: workflowPath,
+      configuration_kind: source.kind,
+      configuration_path: source.path,
     });
     if (host !== null) {
       try {

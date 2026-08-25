@@ -26,6 +26,7 @@ function workflow(
   } = {},
 ): WorkflowSnapshot {
   const config: ServiceConfig = {
+    deployment: null,
     tracker: {
       kind: "test",
       provider: {},
@@ -37,6 +38,13 @@ function workflow(
       requiredLabels: ["ready"],
       excludedLabels: ["driver:direct"],
       secretEnvironmentNames: ["TEST_TRACKER_TOKEN"],
+    },
+    repository: null,
+    preparation: {
+      driver: "none",
+      frozenLockfile: true,
+      lifecycleScripts: false,
+      timeoutMs: 300_000,
     },
     polling: { intervalMs: 30_000 },
     workspace: {

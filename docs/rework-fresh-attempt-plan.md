@@ -1,8 +1,15 @@
 # Rework fresh-attempt lifecycle plan
 
-Status: active implementation plan
-Owner: Symphony maintainers with repository lifecycle hooks
+Status: implemented compatibility plan; repository-hook ownership superseded for new integrations
+Owner: Symphony maintainers
 Opened: 2026-08-24
+
+> [!IMPORTANT]
+> This document records the shipped hook-compatibility design and its historical rollout. Its
+> conclusion that the target repository owns destructive reset is superseded. The accepted
+> [`repository-driver boundary`](repository-driver-boundary.md) now has a managed
+> implementation that moves reset, worktree ownership, leases, and recovery into Symphony while
+> preserving the generation and human-handoff properties described here.
 
 ## Outcome
 
@@ -43,14 +50,18 @@ The rejected Storefronts #77 attempt demonstrated the complete failure chain on 
 2. **The tracker supplies a durable state version.** The GitHub adapter derives an opaque version
    from the Status field-value node and its update timestamp. Symphony hashes that version into a
    filesystem-safe generation. Missing version data is a reset refusal, not permission to reuse.
-3. **A small Symphony receipt makes restart behavior deterministic.** The receipt lives under the
+3. **Durable Symphony state makes restart behavior deterministic.** The compatibility driver uses a
+   small receipt under the
    configured workspace root, outside the agent worktree. It records issue identity, workspace key,
    generation, and whether the workpad reset completed. A restart resumes the same ready generation
-   and never deletes its new workpad again.
-4. **The repository owns destructive reset.** For a new generation Symphony invokes the existing
-   `before_remove` hook with `SYMPHONY_RUN_STATUS=fresh_attempt_reset`. Ordinary teardown continues
-   to refuse dirty human work; the explicit Rework status authorizes the repository hook to discard
-   only its receipt-validated worktree and task branch.
+   and never deletes its new workpad again. The managed driver instead stores these facts beneath
+   the WorkSession workspace lease and effect outbox in `state.sqlite`; no product receipt is its
+   authority.
+4. **The compatibility harness owns destructive reset.** For a new generation the implemented
+   runtime invokes the existing `before_remove` hook with
+   `SYMPHONY_RUN_STATUS=fresh_attempt_reset`. This was a safe transitional implementation, but new
+   integrations must preserve the refusal invariant through a Symphony-owned repository driver
+   rather than a copied target-repository hook.
 5. **The old workpad is deleted, not rewritten.** After fresh workspace provisioning and before
    `before_run`, the tracker adapter deletes exactly one live `## Agent Workpad` comment. Other
    comments, especially the human review verdict, are untouched. The fresh agent creates its own
@@ -98,8 +109,13 @@ The rejected Storefronts #77 attempt demonstrated the complete failure chain on 
   fresh state and is restricted to the configured repository.
 - Existing continuation, terminal-after-release, refusal-retention, secret-scrubbing, and workspace
   path-safety tests remain green.
+- The managed successor additionally proves same-generation reuse, changed-generation replacement,
+  crash recovery after Git creation without a second branch/worktree, and dirty/ambiguous cleanup
+  retention against real temporary Git repositories.
 
 ## Live rollout for Storefronts #77
+
+This section is a historical compatibility runbook, not the pilot sequence for the managed driver.
 
 1. Keep #77 in Human Review and keep the old daemon stopped during implementation.
 2. Close stale PR #76 under the already-authorized Rework decision.

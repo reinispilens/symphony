@@ -14,18 +14,20 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "pnpm format:check && pnpm typecheck && pnpm test",
     "dev": "tsx src/cli.ts",
-    "format": "prettier --write README.md WORKFLOW.example.md package.json pnpm-workspace.yaml tsconfig.json tsconfig.build.json vitest.config.ts \"src/**/*.ts\" \"test/**/*.ts\" \"test/**/*.mjs\" \"docs/*.md\"",
-    "format:check": "prettier --check README.md WORKFLOW.example.md package.json pnpm-workspace.yaml tsconfig.json tsconfig.build.json vitest.config.ts \"src/**/*.ts\" \"test/**/*.ts\" \"test/**/*.mjs\" \"docs/*.md\"",
+    "format": "prettier --write README.md WORKFLOW.example.md package.json pnpm-workspace.yaml tsconfig.json tsconfig.build.json vitest.config.ts \"src/**/*.ts\" \"test/**/*.ts\" \"test/**/*.mjs\" \"docs/*.md\" \"examples/**/*.json\" \"examples/**/*.md\"",
+    "format:check": "prettier --check README.md WORKFLOW.example.md package.json pnpm-workspace.yaml tsconfig.json tsconfig.build.json vitest.config.ts \"src/**/*.ts\" \"test/**/*.ts\" \"test/**/*.mjs\" \"docs/*.md\" \"examples/**/*.json\" \"examples/**/*.md\"",
     "start": "node dist/cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "better-sqlite3": "13.0.3",
     "liquidjs": "10.29.0",
     "yaml": "2.9.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
     "@types/node": "22.20.1",
     "prettier": "3.9.6",
     "tsx": "4.23.12",

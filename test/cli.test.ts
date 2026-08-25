@@ -3,6 +3,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  buildDaemonHost,
   parseCliArguments,
   runCli,
   type DaemonHost,
@@ -53,19 +54,39 @@ function host(): DaemonHost & {
 }
 
 describe("Symphony CLI", () => {
+  it("refuses a repository-owned workflow as managed Git deployment authority", async () => {
+    await expect(
+      buildDaemonHost({
+        source: {
+          kind: "workflow",
+          path: path.resolve("WORKFLOW.example.md"),
+        },
+        environment: {},
+        logger: logger(),
+      }),
+    ).rejects.toMatchObject({ code: "deployment_binding_refused" });
+  });
+
   it("parses one positional workflow and rejects unknown or competing arguments", () => {
     expect(parseCliArguments([])).toEqual({
       action: "run",
-      workflowPath: undefined,
+      source: { kind: "workflow", path: undefined },
     });
     expect(parseCliArguments(["repo/WORKFLOW.md"])).toEqual({
       action: "run",
-      workflowPath: "repo/WORKFLOW.md",
+      source: { kind: "workflow", path: "repo/WORKFLOW.md" },
+    });
+    expect(parseCliArguments(["--binding", "deploy/widget.json"])).toEqual({
+      action: "run",
+      source: { kind: "binding", path: "deploy/widget.json" },
     });
     expect(() => parseCliArguments(["--port", "3"])).toThrow("unknown option");
     expect(() => parseCliArguments(["one", "two"])).toThrow(
       "at most one workflow path",
     );
+    expect(() =>
+      parseCliArguments(["WORKFLOW.md", "--binding", "deploy.json"]),
+    ).toThrow("cannot be combined");
   });
 
   it("prints help and version without constructing a daemon", async () => {
@@ -101,9 +122,12 @@ describe("Symphony CLI", () => {
 
     await expect(runCli([], dependencies)).resolves.toBe(0);
     await expect(runCli(["config/WORKFLOW.md"], dependencies)).resolves.toBe(0);
-    expect(created.map((entry) => entry.workflowPath)).toEqual([
-      "/srv/repository/WORKFLOW.md",
-      "/srv/repository/config/WORKFLOW.md",
+    expect(created.map((entry) => entry.source)).toEqual([
+      { kind: "workflow", path: "/srv/repository/WORKFLOW.md" },
+      {
+        kind: "workflow",
+        path: "/srv/repository/config/WORKFLOW.md",
+      },
     ]);
     expect(firstHost.start).toHaveBeenCalledOnce();
     expect(firstHost.stop).toHaveBeenCalledOnce();
@@ -125,7 +149,8 @@ describe("Symphony CLI", () => {
       expect(testLogger.error).toHaveBeenCalledWith(
         "service outcome=failed",
         expect.objectContaining({
-          workflow_path: path.join(directory, "WORKFLOW.md"),
+          configuration_kind: "workflow",
+          configuration_path: path.join(directory, "WORKFLOW.md"),
         }),
       );
     });

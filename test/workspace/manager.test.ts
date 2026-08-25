@@ -15,6 +15,14 @@ function config(
   provider: WorkspaceLifecycleConfig["workspace"]["provider"] = "directory",
 ): WorkspaceLifecycleConfig {
   return {
+    deployment: null,
+    repository: null,
+    preparation: {
+      driver: "none",
+      frozenLockfile: true,
+      lifecycleScripts: false,
+      timeoutMs: 300_000,
+    },
     secretEnvironmentNames: ["TEST_TRACKER_TOKEN"],
     workflowPath: path.join(directory, "WORKFLOW.md"),
     workspace: {

@@ -1,12 +1,21 @@
 import type { JsonObject } from "./shared/json.js";
 
 export type SymphonyErrorCode =
+  | "agent_sandbox_refused"
   | "config_validation_error"
+  | "deployment_binding_invalid"
+  | "deployment_binding_refused"
   | "fresh_attempt_invalid"
   | "fresh_attempt_reset_failed"
   | "hook_failed"
   | "hook_timeout"
   | "missing_workflow_file"
+  | "preparation_failed"
+  | "preparation_refused"
+  | "repository_driver_failed"
+  | "repository_driver_refused"
+  | "repository_profile_invalid"
+  | "runtime_quiescence_refused"
   | "template_parse_error"
   | "template_render_error"
   | "workflow_front_matter_not_a_map"
