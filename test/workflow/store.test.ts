@@ -9,12 +9,13 @@ import {
   withTempDirectory,
 } from "../support/factories.js";
 
-function workflow(intervalMs: number): string {
+function workflow(intervalMs: number, workspaceRoot?: string): string {
   return `---
 tracker:
   kind: test
 polling:
   interval_ms: ${intervalMs}
+${workspaceRoot === undefined ? "" : `workspace:\n  root: ${workspaceRoot}\n`}
 ---
 Work on {{ issue.identifier }}.
 `;
@@ -58,6 +59,38 @@ describe("WorkflowStore", () => {
         status: "reloaded",
       });
       expect(store.current.config.polling.intervalMs).toBe(3000);
+    });
+  });
+
+  it("requires restart when the state/workspace topology changes", async () => {
+    await withTempDirectory(async (directory) => {
+      const workflowPath = path.join(directory, "WORKFLOW.md");
+      await writeFile(
+        workflowPath,
+        workflow(1000, path.join(directory, "workspaces-a")),
+        "utf8",
+      );
+      const store = new WorkflowStore({
+        workflowPath,
+        trackerProfiles: testTrackerProfiles,
+      });
+      const initial = await store.loadInitial();
+
+      await writeFile(
+        workflowPath,
+        workflow(2000, path.join(directory, "workspaces-b")),
+        "utf8",
+      );
+      const result = await store.checkForUpdates();
+      expect(result).toMatchObject({ status: "rejected" });
+      if (result.status === "rejected") {
+        expect(String(result.error)).toContain("requires a daemon restart");
+      }
+      expect(store.current.sourceHash).toBe(initial.sourceHash);
+      expect(store.current.config.workspace.root).toBe(
+        path.join(directory, "workspaces-a"),
+      );
+      expect(store.current.config.polling.intervalMs).toBe(1000);
     });
   });
 

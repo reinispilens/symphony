@@ -1,15 +1,22 @@
 import type { Issue } from "../domain/issue.js";
-import { errorMessage } from "../errors.js";
+import { errorMessage, SymphonyError } from "../errors.js";
 import { nullLogger, type Logger } from "../observability/logger.js";
+import {
+  NoopPreparationDriver,
+  type PreparationDriver,
+} from "../preparation/driver.js";
+import type {
+  RepositoryAttemptAuthority,
+  RepositoryCleanupAuthority,
+  RepositoryDriver,
+  Workspace,
+  WorkspaceLifecycleConfig,
+} from "../repository/driver.js";
 import type { TrackerAdapter } from "../tracker/adapter.js";
 import { issueRoutable, normalizedTrackerValue } from "../tracker/routing.js";
 import { renderPrompt } from "../workflow/prompt.js";
 import type { WorkflowSnapshot } from "../workflow/store.js";
-import {
-  WorkspaceManager,
-  type Workspace,
-  type WorkspaceLifecycleConfig,
-} from "../workspace/manager.js";
+import { WorkspaceManager } from "../workspace/manager.js";
 import {
   CodexAppServerSession,
   type CodexAppServerSessionOptions,
@@ -17,6 +24,11 @@ import {
 } from "./app-server-client.js";
 import { AgentError } from "./errors.js";
 import type { AgentEventHandler } from "./events.js";
+import {
+  cleanupManagedCodexSandboxSession,
+  openManagedCodexSandbox,
+  type ManagedCodexSandbox,
+} from "./managed-sandbox.js";
 
 export interface LiveCodexSession {
   readonly pid: number | undefined;
@@ -34,6 +46,8 @@ export interface AgentRunOptions {
   readonly freshAttemptGeneration: string | null;
   readonly issue: Issue;
   readonly onEvent?: AgentEventHandler;
+  readonly onWorkspace?: (workspace: Workspace) => void | Promise<void>;
+  readonly repositoryAuthority?: RepositoryAttemptAuthority;
   readonly signal?: AbortSignal;
   readonly tracker: TrackerAdapter;
   readonly workflow: WorkflowSnapshot;
@@ -48,8 +62,11 @@ export interface AgentRunResult {
 
 export interface AgentRunnerOptions {
   readonly logger?: Logger;
+  readonly preparationDriver?: PreparationDriver;
   readonly processEnvironment?: Readonly<Record<string, string | undefined>>;
   readonly sessionFactory?: CodexSessionFactory;
+  readonly repositoryDriver?: RepositoryDriver;
+  /** @deprecated Compatibility alias; use repositoryDriver. */
   readonly workspaceManager?: WorkspaceManager;
 }
 
@@ -89,20 +106,36 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted === true) throw cancellationError();
 }
 
+function lifecycleConfig(workflow: WorkflowSnapshot): WorkspaceLifecycleConfig {
+  return {
+    deployment: workflow.config.deployment,
+    hooks: workflow.config.hooks,
+    preparation: workflow.config.preparation,
+    repository: workflow.config.repository,
+    secretEnvironmentNames: workflow.config.tracker.secretEnvironmentNames,
+    workflowPath: workflow.path,
+    workspace: workflow.config.workspace,
+  };
+}
+
 /** Workspace + prompt + one live Codex session with bounded continuations. */
 export class AgentRunner {
   readonly #logger: Logger;
+  readonly #preparationDriver: PreparationDriver;
   readonly #processEnvironment: Readonly<Record<string, string | undefined>>;
   readonly #sessionFactory: CodexSessionFactory;
-  readonly #workspaceManager: WorkspaceManager;
+  readonly #repositoryDriver: RepositoryDriver;
 
   constructor(options: AgentRunnerOptions = {}) {
     this.#logger = options.logger ?? nullLogger;
+    this.#preparationDriver =
+      options.preparationDriver ?? new NoopPreparationDriver();
     this.#processEnvironment = options.processEnvironment ?? process.env;
     this.#sessionFactory =
       options.sessionFactory ??
       ((sessionOptions) => CodexAppServerSession.start(sessionOptions));
-    this.#workspaceManager =
+    this.#repositoryDriver =
+      options.repositoryDriver ??
       options.workspaceManager ??
       new WorkspaceManager({
         logger: this.#logger,
@@ -113,24 +146,30 @@ export class AgentRunner {
   async cleanupWorkspace(
     issue: Issue,
     workflow: WorkflowSnapshot,
+    authority?: RepositoryCleanupAuthority,
   ): Promise<void> {
-    await this.#workspaceManager.remove(issue, {
-      hooks: workflow.config.hooks,
-      secretEnvironmentNames: workflow.config.tracker.secretEnvironmentNames,
-      workflowPath: workflow.path,
-      workspace: workflow.config.workspace,
-    });
+    const lifecycle = lifecycleConfig(workflow);
+    await this.quiesceRuntime(workflow, authority);
+    await this.#preparationDriver.cleanup(authority, lifecycle);
+    await this.#repositoryDriver.remove(issue, lifecycle, authority);
+  }
+
+  async quiesceRuntime(
+    workflow: WorkflowSnapshot,
+    authority?: RepositoryCleanupAuthority,
+  ): Promise<void> {
+    await cleanupManagedCodexSandboxSession(
+      lifecycleConfig(workflow),
+      authority,
+      this.#processEnvironment,
+    );
   }
 
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
     const { config } = options.workflow;
-    const lifecycle: WorkspaceLifecycleConfig = {
-      hooks: config.hooks,
-      secretEnvironmentNames: config.tracker.secretEnvironmentNames,
-      workflowPath: options.workflow.path,
-      workspace: config.workspace,
-    };
+    const lifecycle = lifecycleConfig(options.workflow);
     let workspace: Workspace | null = null;
+    let managedSandbox: ManagedCodexSandbox | null = null;
     let session: LiveCodexSession | null = null;
     let lastSessionId: string | null = null;
     let runStatus = "failed";
@@ -160,18 +199,32 @@ export class AgentRunner {
           );
         }
         try {
-          const preparation = await this.#workspaceManager.prepareFreshAttempt(
+          const preparation = await this.#repositoryDriver.prepareFreshAttempt(
             options.issue,
             lifecycle,
             options.freshAttemptGeneration,
+            {
+              attempt: options.attempt,
+              generation: options.freshAttemptGeneration,
+              ...(options.repositoryAuthority === undefined
+                ? {}
+                : { authority: options.repositoryAuthority }),
+            },
           );
           workspace = preparation.workspace;
           if (preparation.resetWorkpad) {
             await control.resetWorkpad();
-            await this.#workspaceManager.markFreshAttemptReady(
+            await this.#repositoryDriver.markFreshAttemptReady(
               options.issue,
               lifecycle,
               options.freshAttemptGeneration,
+              {
+                attempt: options.attempt,
+                generation: options.freshAttemptGeneration,
+                ...(options.repositoryAuthority === undefined
+                  ? {}
+                  : { authority: options.repositoryAuthority }),
+              },
             );
           }
         } catch (error) {
@@ -188,12 +241,26 @@ export class AgentRunner {
           );
         }
       } else {
-        workspace = await this.#workspaceManager.prepare(
+        workspace = await this.#repositoryDriver.prepare(
           options.issue,
           lifecycle,
+          {
+            attempt: options.attempt,
+            ...(options.repositoryAuthority === undefined
+              ? {}
+              : { authority: options.repositoryAuthority }),
+          },
         );
       }
-      await this.#workspaceManager.beforeRun(
+      await options.onWorkspace?.(workspace);
+      await this.#preparationDriver.prepare({
+        authority: options.repositoryAuthority,
+        config: lifecycle,
+        issue: options.issue,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        workspace,
+      });
+      await this.#repositoryDriver.beforeRun(
         options.issue,
         workspace,
         lifecycle,
@@ -202,11 +269,20 @@ export class AgentRunner {
           ...(options.freshAttemptGeneration === null
             ? {}
             : { generation: options.freshAttemptGeneration }),
+          ...(options.repositoryAuthority === undefined
+            ? {}
+            : { authority: options.repositoryAuthority }),
         },
       );
-      await this.#workspaceManager.assertAgentLaunchCwd(
+      await this.#repositoryDriver.assertAgentLaunchCwd(
         workspace,
         lifecycle,
+        workspace.path,
+      );
+      managedSandbox = await openManagedCodexSandbox(
+        lifecycle,
+        options.repositoryAuthority,
+        this.#processEnvironment,
         workspace.path,
       );
       throwIfAborted(options.signal);
@@ -219,19 +295,20 @@ export class AgentRunner {
       const toolRuntime =
         options.tracker.agentToolRuntime?.(options.issue) ?? null;
       session = await this.#sessionFactory({
-        command: config.codex.command,
+        command: managedSandbox?.command ?? config.codex.command,
         cwd: workspace.path,
         readTimeoutMs: config.codex.readTimeoutMs,
         turnTimeoutMs: config.codex.turnTimeoutMs,
         adapterSecretEnvironmentNames: config.tracker.secretEnvironmentNames,
         approvalPolicy: config.codex.approvalPolicy,
-        environment: this.#processEnvironment,
+        environment: managedSandbox?.environment ?? this.#processEnvironment,
         logger: this.#logger,
         ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
         threadSandbox: config.codex.threadSandbox,
         title: `${options.issue.identifier}: ${options.issue.title}`,
         toolRuntime,
-        turnSandboxPolicy: config.codex.turnSandboxPolicy,
+        turnSandboxPolicy:
+          managedSandbox?.turnSandboxPolicy ?? config.codex.turnSandboxPolicy,
       });
       throwIfAborted(options.signal);
 
@@ -293,6 +370,7 @@ export class AgentRunner {
       throw error;
     } finally {
       options.signal?.removeEventListener("abort", onAbort);
+      let managedFinalizationError: unknown | null = null;
       if (session !== null) {
         try {
           await session.close();
@@ -305,9 +383,44 @@ export class AgentRunner {
           });
         }
       }
+      if (managedSandbox !== null) {
+        try {
+          await managedSandbox.quiesce();
+        } catch (error) {
+          runStatus = "failed";
+          managedFinalizationError = error;
+          this.#logger.error("Managed Codex runtime is not quiescent", {
+            issue_id: options.issue.id,
+            issue_identifier: options.issue.identifier,
+            session_id: lastSessionId,
+            error: errorMessage(error),
+          });
+        }
+        if (managedFinalizationError === null) {
+          try {
+            await managedSandbox.cleanup();
+          } catch (error) {
+            runStatus = "failed";
+            managedFinalizationError = new SymphonyError(
+              "runtime_quiescence_refused",
+              "Managed Codex runtime was quiescent but its private state could not be removed",
+              { cause: error },
+            );
+            this.#logger.error(
+              "Failed to clean managed Codex runtime sandbox",
+              {
+                issue_id: options.issue.id,
+                issue_identifier: options.issue.identifier,
+                session_id: lastSessionId,
+                error: errorMessage(error),
+              },
+            );
+          }
+        }
+      }
       if (workspace !== null) {
         try {
-          await this.#workspaceManager.afterRun(
+          await this.#repositoryDriver.afterRun(
             options.issue,
             workspace,
             lifecycle,
@@ -316,6 +429,9 @@ export class AgentRunner {
               ...(options.freshAttemptGeneration === null
                 ? {}
                 : { generation: options.freshAttemptGeneration }),
+              ...(options.repositoryAuthority === undefined
+                ? {}
+                : { authority: options.repositoryAuthority }),
               status: runStatus,
             },
           );
@@ -330,6 +446,9 @@ export class AgentRunner {
             },
           );
         }
+      }
+      if (managedFinalizationError !== null) {
+        throw managedFinalizationError;
       }
     }
   }

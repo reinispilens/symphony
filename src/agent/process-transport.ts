@@ -39,11 +39,18 @@ export interface AppServerTransportHandler {
 }
 
 export interface AppServerTransportOptions {
-  readonly command: string;
+  readonly command: AppServerCommand;
   readonly cwd: string;
   readonly environment: Readonly<Record<string, string>>;
   readonly maxLineBytes?: number;
 }
+
+export interface DirectAppServerCommand {
+  readonly executable: string;
+  readonly args: readonly string[];
+}
+
+export type AppServerCommand = string | DirectAppServerCommand;
 
 const noopHandler: AppServerTransportHandler = {
   onActivity: () => undefined,
@@ -155,7 +162,15 @@ export class AppServerProcessTransport {
 
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawn("bash", ["-lc", options.command], {
+      const executable =
+        typeof options.command === "string"
+          ? "bash"
+          : options.command.executable;
+      const args =
+        typeof options.command === "string"
+          ? ["-lc", options.command]
+          : [...options.command.args];
+      child = spawn(executable, args, {
         cwd,
         detached: process.platform !== "win32",
         env: { ...options.environment },

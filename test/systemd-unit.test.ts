@@ -22,7 +22,7 @@ describe("per-user systemd service", () => {
 
     expect(service).toContain("EnvironmentFile=%h/.config/symphony/%i.env");
     expect(service).toContain(
-      "ExecStart=/usr/bin/env ${SYMPHONY_NODE_PATH} ${SYMPHONY_CLI_PATH} ${SYMPHONY_WORKFLOW_PATH}",
+      "ExecStart=/usr/bin/env ${SYMPHONY_NODE_PATH} ${SYMPHONY_CLI_PATH} --binding ${SYMPHONY_BINDING_PATH}",
     );
     expect(service).not.toMatch(/^EnvironmentFile=-/mu);
     expect(service).not.toMatch(/^(?:User|Group)=/mu);

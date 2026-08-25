@@ -8,6 +8,13 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../shared/json.js";
+import {
+  MANAGED_CODEX_APPROVAL_POLICY,
+  MANAGED_CODEX_COMMAND,
+  MANAGED_CODEX_THREAD_SANDBOX,
+  managedCodexTurnSandboxPolicy,
+} from "../security/managed-codex-policy.js";
+import type { AcceptedConfigurationSnapshot } from "../state/model.js";
 import type { TrackerConfigProfiles } from "../tracker/config-profile.js";
 import type { WorkflowDefinition } from "./definition.js";
 
@@ -28,8 +35,63 @@ export interface PollingConfig {
 }
 
 export interface WorkspaceConfig {
-  readonly provider: "directory" | "harness";
+  readonly provider: "directory" | "git-worktree" | "harness";
   readonly root: string;
+}
+
+export interface RepositoryConfig {
+  readonly identity: string;
+  readonly hostname: string;
+  readonly baseRef: string;
+  readonly branchPrefix: string;
+  /** Exact accepted product-profile digest; null only on the workflow compatibility path. */
+  readonly profileDigest: string | null;
+}
+
+export interface ManagedProcessContainmentConfig {
+  readonly provider: "systemd-user-scope";
+  readonly shutdownTimeoutMs: number;
+  readonly systemdRunExecutable: string;
+  readonly systemctlExecutable: string;
+}
+
+/**
+ * Operator-owned package preparation authority. Product repositories select
+ * only the portable preparation class; they cannot select host executables,
+ * cache roots, registry identity, or network behavior.
+ */
+export interface ManagedPnpmPreparationAuthorityConfig {
+  readonly nodeExecutable: string;
+  readonly pnpmEntryPoint: string;
+  readonly sandboxExecutable: string;
+  readonly dependencyPolicy: {
+    readonly id: string;
+    readonly digest: string;
+    readonly mode: "offline";
+    readonly registry: string;
+    readonly seedStoreRoot: string;
+    readonly pnpmVersion: string;
+  };
+}
+
+export interface DeploymentAuthorityConfig {
+  readonly bindingId: string;
+  readonly bindingDigest: string;
+  readonly bindingPath: string;
+  readonly sourceRoot: string;
+  readonly stateRoot: string;
+  readonly acceptedConfiguration: AcceptedConfigurationSnapshot;
+  readonly codexExecutable: string;
+  readonly gitExecutable: string;
+  readonly preparation: ManagedPnpmPreparationAuthorityConfig | null;
+  readonly processContainment: ManagedProcessContainmentConfig;
+}
+
+export interface PreparationConfig {
+  readonly driver: "none" | "pnpm";
+  readonly frozenLockfile: true;
+  readonly lifecycleScripts: false;
+  readonly timeoutMs: number;
 }
 
 export interface HooksConfig {
@@ -58,7 +120,10 @@ export interface CodexConfig {
 }
 
 export interface ServiceConfig {
+  readonly deployment: DeploymentAuthorityConfig | null;
   readonly tracker: TrackerConfig;
+  readonly repository: RepositoryConfig | null;
+  readonly preparation: PreparationConfig;
   readonly polling: PollingConfig;
   readonly workspace: WorkspaceConfig;
   readonly hooks: HooksConfig;
@@ -101,6 +166,18 @@ function optionalString(
   const value = root[key];
   if (value === undefined) return fallback;
   if (typeof value !== "string") fail(pathLabel, "must be a string");
+  return value;
+}
+
+function optionalBoolean(
+  root: JsonObject,
+  key: string,
+  pathLabel: string,
+  fallback: boolean,
+): boolean {
+  const value = root[key];
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") fail(pathLabel, "must be a boolean");
   return value;
 }
 
@@ -358,6 +435,16 @@ export function resolveServiceConfig(
   }
 
   const polling = optionalObject(definition.config, "polling", "polling");
+  const preparation = optionalObject(
+    definition.config,
+    "preparation",
+    "preparation",
+  );
+  const repository = optionalObject(
+    definition.config,
+    "repository",
+    "repository",
+  );
   const workspace = optionalObject(definition.config, "workspace", "workspace");
   const hooks = optionalObject(definition.config, "hooks", "hooks");
   const agent = optionalObject(definition.config, "agent", "agent");
@@ -377,8 +464,53 @@ export function resolveServiceConfig(
     "workspace.provider",
     "directory",
   );
-  if (workspaceProvider !== "directory" && workspaceProvider !== "harness") {
-    fail("workspace.provider", "must be 'directory' or 'harness'");
+  if (
+    workspaceProvider !== "directory" &&
+    workspaceProvider !== "git-worktree" &&
+    workspaceProvider !== "harness"
+  ) {
+    fail(
+      "workspace.provider",
+      "must be 'directory', 'git-worktree', or 'harness'",
+    );
+  }
+  let approvalPolicy = codex["approval_policy"] ?? null;
+  let threadSandbox = codex["thread_sandbox"] ?? null;
+  let turnSandboxPolicy = codex["turn_sandbox_policy"] ?? null;
+  if (workspaceProvider === "git-worktree") {
+    if (codexCommand !== MANAGED_CODEX_COMMAND) {
+      fail(
+        "codex.command",
+        `must remain '${MANAGED_CODEX_COMMAND}' for workspace.provider 'git-worktree'`,
+      );
+    }
+    if (
+      approvalPolicy !== null &&
+      approvalPolicy !== MANAGED_CODEX_APPROVAL_POLICY
+    ) {
+      fail(
+        "codex.approval_policy",
+        `must remain '${MANAGED_CODEX_APPROVAL_POLICY}' for workspace.provider 'git-worktree'`,
+      );
+    }
+    if (
+      threadSandbox !== null &&
+      threadSandbox !== MANAGED_CODEX_THREAD_SANDBOX
+    ) {
+      fail(
+        "codex.thread_sandbox",
+        `must remain '${MANAGED_CODEX_THREAD_SANDBOX}' for workspace.provider 'git-worktree'`,
+      );
+    }
+    if (Object.hasOwn(codex, "turn_sandbox_policy")) {
+      fail(
+        "codex.turn_sandbox_policy",
+        "is owned by Symphony for workspace.provider 'git-worktree' and must be omitted",
+      );
+    }
+    approvalPolicy = MANAGED_CODEX_APPROVAL_POLICY;
+    threadSandbox = MANAGED_CODEX_THREAD_SANDBOX;
+    turnSandboxPolicy = managedCodexTurnSandboxPolicy();
   }
   const afterCreate = optionalString(
     hooks,
@@ -413,8 +545,131 @@ export function resolveServiceConfig(
       );
     }
   }
+  if (
+    workspaceProvider === "git-worktree" &&
+    [afterCreate, beforeRun, afterRun, beforeRemove].some(
+      (command) => command !== null,
+    )
+  ) {
+    fail(
+      "hooks",
+      "must not define lifecycle commands for workspace.provider 'git-worktree'",
+    );
+  }
+
+  let repositoryConfig: RepositoryConfig | null = null;
+  if (
+    Object.keys(repository).length > 0 ||
+    workspaceProvider === "git-worktree"
+  ) {
+    const identity = requiredNonEmptyString(
+      repository,
+      "identity",
+      "repository.identity",
+    );
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(identity)) {
+      fail("repository.identity", "must have the form owner/repository");
+    }
+    const hostname = requiredNonEmptyString(
+      provider,
+      "hostname",
+      "tracker.provider.hostname",
+    ).toLowerCase();
+    if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?$/u.test(hostname)) {
+      fail(
+        "tracker.provider.hostname",
+        "must be a hostname with an optional port",
+      );
+    }
+    const baseRef = requiredNonEmptyString(
+      repository,
+      "base_ref",
+      "repository.base_ref",
+    );
+    if (
+      !baseRef.startsWith("refs/heads/") &&
+      !baseRef.startsWith("refs/remotes/")
+    ) {
+      fail(
+        "repository.base_ref",
+        "must be a full refs/heads/* or refs/remotes/* ref",
+      );
+    }
+    const branchPrefix = requiredNonEmptyString(
+      repository,
+      "branch_prefix",
+      "repository.branch_prefix",
+    );
+    if (
+      !branchPrefix.endsWith("/") ||
+      branchPrefix.startsWith("/") ||
+      branchPrefix.includes("..") ||
+      branchPrefix.includes("@{") ||
+      branchPrefix.includes("\\")
+    ) {
+      fail(
+        "repository.branch_prefix",
+        "must be a safe relative Git namespace ending in '/'",
+      );
+    }
+    repositoryConfig = {
+      identity,
+      hostname,
+      baseRef,
+      branchPrefix,
+      profileDigest: null,
+    };
+    const trackerOwner = provider["owner"];
+    const trackerRepository = provider["repo"];
+    if (
+      typeof trackerOwner === "string" &&
+      typeof trackerRepository === "string" &&
+      `${trackerOwner}/${trackerRepository}`.toLowerCase() !==
+        identity.toLowerCase()
+    ) {
+      fail(
+        "repository.identity",
+        "must match tracker.provider owner/repo for this workflow",
+      );
+    }
+  }
+
+  const preparationDriver = optionalString(
+    preparation,
+    "driver",
+    "preparation.driver",
+    "none",
+  );
+  if (preparationDriver !== "none" && preparationDriver !== "pnpm") {
+    fail("preparation.driver", "must be 'none' or 'pnpm'");
+  }
+  const frozenLockfile = optionalBoolean(
+    preparation,
+    "frozen_lockfile",
+    "preparation.frozen_lockfile",
+    true,
+  );
+  if (!frozenLockfile) {
+    fail("preparation.frozen_lockfile", "must remain true");
+  }
+  const lifecycleScripts = optionalBoolean(
+    preparation,
+    "lifecycle_scripts",
+    "preparation.lifecycle_scripts",
+    false,
+  );
+  if (lifecycleScripts) {
+    fail("preparation.lifecycle_scripts", "must remain false");
+  }
+  if (preparationDriver === "pnpm" && workspaceProvider !== "git-worktree") {
+    fail(
+      "preparation.driver",
+      "'pnpm' requires workspace.provider 'git-worktree'",
+    );
+  }
 
   return {
+    deployment: null,
     tracker: {
       kind,
       provider,
@@ -425,6 +680,20 @@ export function resolveServiceConfig(
       freshAttemptStates,
       freshAttemptFailureState,
       secretEnvironmentNames: [...profile.secretEnvironmentNames],
+    },
+    repository: repositoryConfig,
+    preparation: {
+      driver: preparationDriver,
+      frozenLockfile: true,
+      lifecycleScripts: false,
+      timeoutMs: integer(
+        preparation,
+        "timeout_ms",
+        "preparation.timeout_ms",
+        300_000,
+        (value) => value > 0,
+        "must be a positive integer",
+      ),
     },
     polling: {
       intervalMs: integer(
@@ -489,9 +758,9 @@ export function resolveServiceConfig(
     },
     codex: {
       command: codexCommand,
-      approvalPolicy: codex["approval_policy"] ?? null,
-      threadSandbox: codex["thread_sandbox"] ?? null,
-      turnSandboxPolicy: codex["turn_sandbox_policy"] ?? null,
+      approvalPolicy,
+      threadSandbox,
+      turnSandboxPolicy,
       turnTimeoutMs: integer(
         codex,
         "turn_timeout_ms",

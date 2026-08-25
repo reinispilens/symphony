@@ -1,4 +1,7 @@
 ---
+# COMPATIBILITY/MIGRATION REFERENCE ONLY.
+# A daemon refuses this repository-owned git-worktree configuration. New managed deployments use
+# examples/managed/repository-profile.json plus an operator-owned deployment binding.
 tracker:
   kind: github-projects
   provider:
@@ -37,16 +40,27 @@ polling:
   interval_ms: 30000
 
 workspace:
-  # The repository hook owns both population and deletion.
-  provider: harness
+  # This documents the frozen pre-binding shape so existing consumers can be
+  # diagnosed and migrated. It is not accepted as managed deployment authority.
+  provider: git-worktree
   root: /absolute/path/to/repository-workspaces
 
-hooks:
-  timeout_ms: 60000
-  after_create: node "$SYMPHONY_WORKFLOW_DIR/scripts/harness/prepare-workspace.mjs"
-  before_run: node "$SYMPHONY_WORKFLOW_DIR/scripts/harness/before-run.mjs"
-  after_run: node "$SYMPHONY_WORKFLOW_DIR/scripts/harness/after-run.mjs"
-  before_remove: node "$SYMPHONY_WORKFLOW_DIR/scripts/harness/remove-workspace.mjs"
+repository:
+  # Must match the configured tracker owner/repository and this workflow
+  # checkout's independently observed Git origin.
+  identity: your-owner/your-repository
+  # A full trusted ref is resolved and pinned before the worktree effect.
+  base_ref: refs/remotes/origin/main
+  # Symphony adds collision-safe WorkSession and generation components.
+  branch_prefix: symphony/
+
+preparation:
+  # Portable product class only. In managed mode the separate operator binding
+  # pins the exact toolchain, offline seed/policy, and network-less sandbox.
+  driver: pnpm
+  frozen_lockfile: true
+  lifecycle_scripts: false
+  timeout_ms: 300000
 
 agent:
   max_concurrent_agents: 1
@@ -54,9 +68,6 @@ agent:
   max_retry_backoff_ms: 300000
 
 codex:
-  command: codex app-server
-  approval_policy: never
-  thread_sandbox: workspace-write
   turn_timeout_ms: 3600000
   read_timeout_ms: 5000
   stall_timeout_ms: 300000
@@ -72,9 +83,10 @@ Issue description:
 
 {{ issue.description | default: "No description was provided." }}
 
-This is attempt {{ attempt | default: 0 }}. In ordinary states, inspect the existing workspace
-before assuming this is a fresh run. In Rework, the driver has already proven a fresh generation:
-read surviving reviewer comments with `github_issue_comments_list`, do not recover rejected
-worktree state, and close any stale delivery named by the review before replacing it. Finish the
-acceptance criteria, run the repository-owned proof path, and move the card only through an
-agent-authorized status exposed by the available tools. Never wait for interactive input.
+This is attempt {{ attempt | default: 0 }}. In ordinary states, inspect the existing managed
+workspace before assuming this is a fresh run. In Rework, Symphony's RepositoryDriver has already
+proven a fresh generation: read surviving reviewer comments with `github_issue_comments_list`, do
+not recover rejected worktree state, and close any stale delivery named by the review before
+replacing it. Finish the acceptance criteria, run the product repository's canonical proof path,
+and move the card only through an agent-authorized status exposed by the available tools. Never
+wait for interactive input.

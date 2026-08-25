@@ -24,8 +24,8 @@ The service solves four operational problems:
 - It turns issue execution into a repeatable daemon workflow instead of manual scripts.
 - It isolates agent execution in per-issue workspaces so agent commands run only inside per-issue
   workspace directories.
-- It keeps the workflow policy in-repo (`WORKFLOW.md`) so teams version the agent prompt and runtime
-  settings with their code.
+- It keeps portable product identity and authoring context in-repo while keeping host/runtime
+  authority in an independently controlled deployment binding.
 - It provides enough observability to operate and debug multiple concurrent agent runs.
 
 Implementations are expected to document their trust and safety posture explicitly. This
@@ -48,14 +48,17 @@ Important boundary:
 ### 2.1 Goals
 
 - Poll the issue tracker on a fixed cadence and dispatch work with bounded concurrency.
-- Maintain a single authoritative orchestrator state for dispatch, retries, and reconciliation.
+- Maintain one durable WorkSession authority for pinned inputs, decisions, attachments, attempts,
+  runtime/workspace leases, retries, sagas, and restart reconciliation, with process-local maps
+  only as projections.
 - Create deterministic per-issue workspaces and preserve them across runs.
 - Stop active runs when issue state changes make them ineligible.
 - Recover from transient failures with exponential backoff.
-- Load runtime behavior from a repository-owned `WORKFLOW.md` contract.
+- Compose managed runtime behavior from an exact-revision product profile/context plus an
+  operator-owned deployment binding; retain repository-owned `WORKFLOW.md` only for compatibility.
 - Expose operator-visible observability (at minimum structured logs).
-- Support tracker/filesystem-driven restart recovery without requiring a persistent database; exact
-  in-memory scheduler state is not restored.
+- Recover after process death from a transactional state store plus independent tracker,
+  Git/filesystem, and provider observations; never reconstruct missing Symphony authority silently.
 
 ### 2.2 Non-Goals
 
@@ -72,10 +75,11 @@ Important boundary:
 
 ### 3.1 Main Components
 
-1. `Workflow Loader`
-   - Reads `WORKFLOW.md`.
-   - Parses YAML front matter and prompt body.
-   - Returns `{config, prompt_template}`.
+1. `Deployment / Workflow Loader`
+   - For managed Git, validates an operator binding, reads the accepted product profile and context
+     from its exact Git revision, and returns one pinned workflow snapshot.
+   - For compatibility, reads `WORKFLOW.md`, parses YAML front matter and prompt body, and returns
+     `{config, prompt_template}`.
 
 2. `Config Layer`
    - Exposes typed getters for workflow config values.
@@ -92,28 +96,38 @@ Important boundary:
 
 4. `Orchestrator`
    - Owns the poll tick.
-   - Owns the in-memory runtime state.
+   - Coordinates transitions through the durable state-store port.
    - Decides which issues to dispatch, retry, stop, or release.
-   - Tracks session metrics and retry queue state.
+   - Keeps process-local workers, timers, and metrics as replaceable projections.
 
-5. `Workspace Manager`
+5. `Symphony State Store`
+   - Owns WorkSessions, revisions, pinned inputs, decisions, human attachments, attempts, runtime
+     leases, workspace leases, durable retries, materialization/proof/delivery state, and
+     external-effect intents.
+   - Provides transactional mutation, fencing, integrity checks, and backup.
+
+6. `Repository Driver`
    - Maps issue identifiers to workspace paths.
-   - Ensures per-issue workspace directories exist.
-   - Runs workspace lifecycle hooks.
-   - Cleans workspaces for terminal issues.
+   - Implements managed Git-worktree lifecycle or an explicitly selected compatibility mode.
+   - Records ownership before external effects and independently verifies guarded cleanup.
 
-6. `Agent Runner`
-   - Creates workspace.
+7. `Preparation Driver`
+   - Performs optional dependency preparation after the repository workspace is ready.
+   - Records inputs and outcome; the built-in pnpm driver runs fail-closed in a restricted sandbox.
+
+8. `Agent Runner`
+   - Receives an already-authorized workspace.
    - Builds prompt from issue + workflow template.
    - Launches the coding agent app-server client.
    - Streams agent updates back to the orchestrator.
 
-7. `Status Surface` (OPTIONAL)
+9. `Status Surface` (OPTIONAL)
    - Presents human-readable runtime status (for example terminal output, dashboard, or other
      operator-facing view).
 
-8. `Logging`
-   - Emits structured runtime logs to one or more configured sinks.
+10. `Logging`
+
+- Emits structured runtime logs to one or more configured sinks.
 
 ### 3.2 Abstraction Levels
 
@@ -127,11 +141,12 @@ Symphony is easiest to port when kept in these layers:
    - Parses front matter into typed runtime settings.
    - Handles defaults, environment tokens, and path normalization.
 
-3. `Coordination Layer` (orchestrator)
-   - Polling loop, issue eligibility, concurrency, retries, reconciliation.
+3. `State and Coordination Layer` (store + orchestrator)
+   - WorkSessions, pinned inputs, decisions, transactions, leases, polling, issue eligibility,
+     concurrency, durable retries, sagas, and reconciliation.
 
-4. `Execution Layer` (workspace + agent subprocess)
-   - Filesystem lifecycle, workspace preparation, coding-agent protocol.
+4. `Execution Layer` (repository + preparation + agent subprocess)
+   - Managed Git/filesystem lifecycle, dependency preparation, and coding-agent protocol.
 
 5. `Integration Layer` (selected tracker adapter)
    - API calls and normalization for tracker data.
@@ -143,8 +158,10 @@ Symphony is easiest to port when kept in these layers:
 ### 3.3 External Dependencies
 
 - One configured issue tracker API.
-- Local filesystem for workspaces and logs.
-- OPTIONAL workspace population tooling (for example Git CLI, if used).
+- Local filesystem for state, workspaces, and logs.
+- SQLite binding providing transactions, integrity checking, and online backup.
+- Git CLI when the managed Git-worktree driver is selected.
+- Bubblewrap and pnpm when the built-in pnpm preparation driver is selected.
 - Coding-agent executable that supports the targeted Codex app-server mode.
 - Host environment authentication for the issue tracker and coding agent. Host-side tracker secret
   environment variables SHOULD NOT be inherited by the coding-agent child process.
@@ -201,9 +218,9 @@ Fields:
 - `created_at` (timestamp or null)
 - `updated_at` (timestamp or null)
 
-#### 4.1.2 Workflow Definition
+#### 4.1.2 Workflow Snapshot
 
-Parsed `WORKFLOW.md` payload:
+Pinned managed composition or parsed compatibility `WORKFLOW.md` payload:
 
 - `config` (map)
   - YAML front matter root object.
@@ -212,7 +229,8 @@ Parsed `WORKFLOW.md` payload:
 
 #### 4.1.3 Service Config (Typed View)
 
-Typed runtime values derived from `WorkflowDefinition.config` plus environment resolution.
+Typed runtime values derived from the accepted managed binding/profile composition or, on the
+compatibility path, `WorkflowDefinition.config` plus environment resolution.
 
 Examples:
 
@@ -233,21 +251,63 @@ Fields (logical):
 - `workspace_key` (collision-resistant sanitized issue identifier)
 - `created_now` (boolean, used to gate `after_create` hook)
 
-#### 4.1.5 Run Attempt
+#### 4.1.5 WorkSession
+
+One durable authoring trajectory. Tracker dispatch is the first implemented origin; interactive
+origin is part of the shared schema so a later manual controller does not require a second store.
+
+Fields (logical):
+
+- `id` (opaque stable identifier)
+- `revision` (monotonically increasing optimistic-concurrency revision)
+- `origin`
+  - `tracker`: tracker kind, repository identity, opaque issue ID, display identifier, and URL
+  - `interactive`: repository identity and initiating actor
+- `repository_identity`
+- `intent`
+- `status` (`active`, `completed`, or `cancelled`)
+- `doctrine_snapshot` (portable repository/path/revision/digest, or null only during the documented
+  doctrine-migration compatibility window)
+- `accepted_configuration` (the immutable product-profile reference, resolved authoring-context
+  manifest and entries, and deployment-binding identity/digest; null only during the documented
+  tracker-configuration compatibility window)
+- `controller_assignment` (kind, controller ID, monotonically increasing fencing generation)
+- ordered decisions/steering/exceptions, with accepted doctrine and `GP-xx` identity on exceptions
+- zero or one revisioned plan with acceptance criteria
+- zero or one human-owned workspace attachment, outside every Attempt and lease
+- zero or more child attempts
+- zero or one durable retry intent
+- append-only source-materialization records
+- protected-proof correlations and typed delivery state (behavior supplied by their extensions)
+
+The WorkSession is Symphony's aggregate root. Tracker comments, filesystem receipts, logs, and
+runtime snapshots MAY project it but MUST NOT become competing writers.
+
+#### 4.1.6 Run Attempt
 
 One execution attempt for one issue.
 
 Fields (logical):
 
-- `issue_id`
-- `issue_identifier`
-- `attempt` (integer or null, `null` for first run, `>=1` for retries/continuation)
-- `workspace_path`
+- `id` (opaque stable identifier)
+- `ordinal` (positive integer unique inside the WorkSession)
+- `tracker_attempt` (integer or null, compatibility prompt/retry counter)
+- `fresh_attempt_generation` (string or null)
 - `started_at`
 - `status`
 - `error` (OPTIONAL)
+- `runtime_lease` (holder, token, controller generation, status, acquired/renewed/expires/released)
+- `workspace_lease` (zero or one, typed by ownership mode)
+- `preparation` (zero or one driver-versioned command, manifest/lock/input digests, dependency-policy
+  snapshot, private-cache path, and four-way outcome)
+- runtime process/thread correlation (non-authoritative)
 
-#### 4.1.6 Live Session (Agent Session Metadata)
+At most one attempt in an active WorkSession may hold an active runtime lease, regardless of its
+expiry timestamp. Expiry makes the lease eligible for reconciliation; it does not release
+authority. A runtime write MUST present the attempt ID, lease token, and controller generation that
+authorized it.
+
+#### 4.1.7 Live Session (Agent Session Metadata)
 
 State tracked while a coding-agent subprocess is running.
 
@@ -269,24 +329,64 @@ Fields:
 - `turn_count` (integer)
   - Number of coding-agent turns started within the current worker lifetime.
 
-#### 4.1.7 Retry Entry
+#### 4.1.8 Retry Entry
 
-Scheduled retry state for an issue.
+Durable scheduled retry intent for a WorkSession. A process timer is only a wake-up projection.
 
 Fields:
 
-- `issue_id`
-- `identifier` (best-effort human ID for status surfaces/logs)
+- `work_session_id`
 - `attempt` (integer, 1-based for retry queue)
-- `due_at_ms` (monotonic clock timestamp)
-- `timer_handle` (runtime-specific timer reference)
+- `due_at` (wall-clock timestamp persisted durably)
+- `recorded_at` (wall-clock timestamp)
 - `error` (string or null)
 - `kind` (`continuation`, `failure`, or `fresh_handoff`)
 - `fresh_attempt_generation` (string or null)
 
-#### 4.1.8 Orchestrator Runtime State
+#### 4.1.9 Workspace Lease
 
-Single authoritative in-memory state owned by the orchestrator.
+Durable Symphony ownership record for the workspace used by an attempt.
+
+Modes:
+
+- `managed`: created by a Symphony RepositoryDriver; guarded cleanup is permitted only through its
+  lease and independent repository/filesystem verification.
+- `legacy-directory` or `legacy-hook`: compatibility state whose cleanup semantics remain with the
+  selected legacy driver.
+
+`attached` is deliberately not a workspace-lease mode. A human-owned checkout is recorded once on
+the WorkSession root as a `HumanWorkspaceAttachment`; RepositoryDriver cleanup and materialization
+accept only the managed/compatibility lease union and therefore cannot receive that attachment.
+
+A managed Git-worktree lease records repository/profile identity and digest, source root,
+workspace root/path/key, immutable base ref/SHA, branch, driver/version, lease token, controller
+generation, fresh-attempt generation, and lifecycle phase. Phases are `allocating`, `provisioned`,
+`ready`, `superseded`, `removal_pending`, `removed`, or `retained`. `superseded` records an atomic
+ownership transfer to a later Attempt that reuses the same physical worktree; it is not a second
+live cleanup claim.
+
+#### 4.1.10 Human Workspace Attachment
+
+A session-level reference to a checkout created and owned by a human or external tool. It records
+an opaque ID, canonical absolute path, repository identity, observed head/change facts (or an
+explicit `unknown` inspection only after safe v1 migration), attaching actor, timestamp,
+`ownership: human`, and `removal_policy: never`.
+
+Recording an attachment creates no Attempt, runtime lease, or workspace lease. An attachment
+cannot coexist with an active runtime or live Attempt workspace lease, cannot be claimed by two
+active WorkSessions, and prevents Attempt admission until a future explicit handoff contract
+changes ownership. Symphony MUST NOT reset, clean, prepare, materialize, or remove it.
+
+#### 4.1.11 External Effect Intent
+
+Transactional record written before a non-database mutation. It contains an ID, WorkSession ID,
+kind, stable idempotency key, controller generation, typed JSON payload, status
+(`pending`, `applied`, or `failed`), result, and timestamps. Symphony MUST NOT hold a database
+transaction open while calling Git, Codex, a tracker, Git hosting, or a proof provider.
+
+#### 4.1.12 Orchestrator Runtime State
+
+Process-local projection owned by the orchestrator. It is not the durable authority.
 
 Fields:
 
@@ -294,7 +394,7 @@ Fields:
 - `max_concurrent_agents` (current effective global concurrency limit)
 - `running` (map `issue_id -> running entry`)
 - `claimed` (set of issue IDs reserved/running/retrying)
-- `retry_attempts` (map `issue_id -> RetryEntry`)
+- `retry_attempts` (map `issue_id -> timer/projection of the durable RetryEntry`)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
 - `codex_totals` (aggregate tokens + runtime seconds)
 - `codex_rate_limits` (latest rate-limit snapshot from agent events)
@@ -319,12 +419,107 @@ Fields:
   - Use the resulting value for the workspace directory name.
 - `Normalized Issue State`
   - Compare states after trimming surrounding whitespace and applying `lowercase`.
-- `Session ID`
+- `WorkSession ID`
+  - Use the opaque state-store identity for the durable aggregate and cross-system correlation.
+  - Never derive it from a tracker identifier, branch, path, or Codex thread.
+- `Attempt ID`
+  - Use the opaque child identity for one fenced execution inside the WorkSession.
+- `Runtime Session ID`
   - Compose from coding-agent `thread_id` and `turn_id` as `<thread_id>-<turn_id>`.
+  - Treat it only as runtime correlation, never as WorkSession or Attempt authority.
 
-## 5. Workflow Specification (Repository Contract)
+## 5. Deployment and Workflow Inputs
 
-### 5.1 File Discovery and Path Resolution
+### 5.0 Managed Deployment Authority
+
+Managed Git worktrees MUST start from an operator-owned deployment binding supplied with
+`--binding`. A positional or default repository-owned `WORKFLOW.md` MUST NOT authorize
+`workspace.provider: git-worktree`.
+
+Managed configuration has two independently validated documents:
+
+1. A product-owned repository profile, read from the exact Git commit selected by the binding.
+2. An operator-owned deployment binding stored outside product source, Symphony state, and managed
+   workspace roots.
+
+The version-1 repository profile is a strict JSON object with:
+
+- `schemaVersion: 1`
+- `repositoryIdentity`: canonical `owner/repository`
+- `baseRef`: full allowed Git ref
+- `authoringContext.promptPath`: repository-relative prompt path
+- `authoringContext.paths`: unique repository-relative context paths
+- `preparationClass`: `none` or `pnpm`
+
+It MUST NOT contain tracker configuration, credentials, source/state/workspace paths, branch
+namespace, concurrency, runtime executables/timeouts, process containment, protected proof, or
+delivery authority.
+
+The version-1 deployment binding is a strict JSON object with:
+
+- its schema version and stable binding ID;
+- product-profile repository identity, source root, repository-relative path, exact lowercase
+  40-character commit ID, and SHA-256 content digest;
+- pairwise-disjoint state and managed-workspace roots plus an allowed branch prefix;
+- an exact regular non-symlink Git executable outside every governed root;
+- tracker provider/routing, polling, concurrency, and retry limits;
+- preparation authority that is `null` exactly when the accepted profile selects `none`; when the
+  profile selects `pnpm`, a timeout, exact Node, pnpm-entry-point, and Bubblewrap paths, and an
+  offline dependency policy naming its stable ID, credential-free approved HTTPS registry
+  identity, real seed-store root, and exact pnpm version;
+- exact Codex executable and runtime timeouts; and
+- `systemd-user-scope` containment with a shutdown timeout and exact `systemd-run` and `systemctl`
+  executable paths.
+
+Resolution MUST:
+
+1. Prove the binding is a regular non-symlink file outside product/state/workspace roots.
+2. Prove the source root is the exact top-level Git worktree and is disjoint from state/workspace
+   roots.
+3. Read the profile blob and every named context blob from the binding's exact accepted commit,
+   never from mutable working-tree files; verify the profile digest and repository identity.
+4. Prove the accepted profile revision is an ancestor of the resolved allowed base commit.
+5. Bound individual and aggregate context bytes, reject duplicate/reserved/escaping paths, and
+   record a deterministic context manifest plus entry digests.
+6. Prove the Git, Codex, and systemd executables are regular non-symlink paths outside all governed roots.
+   When `pnpm` is selected, also prove the preparation executables/entry point are regular
+   non-symlink paths outside those roots, contain no symlink component, and report the exact policy
+   version. Refuse missing or unused pnpm authority instead of allowing the binding to weaken or
+   broaden the product-selected class.
+7. When `pnpm` is selected, prove the dependency seed is a real root disjoint from product source,
+   Symphony state, and managed workspaces; normalize and digest the offline dependency policy.
+8. Construct one pinned workflow snapshot and record the profile, context, and binding
+   identities/digests on the WorkSession before its first Attempt.
+
+The pinned managed source MUST NOT live-reload. Changing a binding or accepted product revision
+requires a clean daemon restart. The binding may select an accepted product revision but MUST NOT
+rewrite its bytes or redefine product proof meaning.
+
+### 5.0.1 Managed runtime policy
+
+For a managed Git Attempt, repository files MUST NOT select the app-server command, approval
+policy, sandbox policy, writable roots, environment, process boundary, or cleanup behavior.
+Symphony MUST:
+
+- launch the binding's exact Codex executable with the single `app-server` argument and no login
+  shell;
+- set approval to `never`, thread sandbox to `workspace-write`, and an exact per-turn
+  `workspaceWrite` policy with network, `/tmp`, and ambient `TMPDIR` excluded;
+- grant only the managed worktree and one runtime-lease-private temp directory under the state
+  root;
+- scrub tracker secrets from the child environment;
+- wrap the command in a deterministic WorkSession/controller-owned systemd user scope with
+  `KillMode=control-group`, collection enabled, and systemd environment expansion disabled; and
+- on every terminal/cancellation/recovery path, signal and observe the full scope empty before
+  removing private runtime state or releasing/expiring the runtime lease.
+
+App-server/process-group exit alone is not quiescence proof. If the user manager cannot be
+contacted, scope state is malformed, or descendants remain after bounded TERM/KILL escalation,
+Symphony MUST retain the active runtime lease and refuse replacement dispatch.
+
+## 5.1 Compatibility Workflow Specification (Repository Contract)
+
+### 5.1.1 File Discovery and Path Resolution
 
 Workflow file path precedence:
 
@@ -336,15 +531,14 @@ Loader behavior:
 - If the file cannot be read, return `missing_workflow_file` error.
 - The workflow file is expected to be repository-owned and version-controlled.
 
-### 5.2 File Format
+### 5.1.2 File Format
 
 `WORKFLOW.md` is a Markdown file with OPTIONAL YAML front matter.
 
-Design note:
+Compatibility design note:
 
-- `WORKFLOW.md` SHOULD be self-contained enough to describe and run different workflows (prompt,
-  runtime settings, hooks, and tracker selection/config) without requiring out-of-band
-  service-specific configuration.
+- `WORKFLOW.md` remains self-contained for existing directory/harness consumers. It is not the
+  onboarding contract for new managed repositories.
 
 Parsing rules:
 
@@ -359,13 +553,15 @@ Returned workflow object:
 - `config`: front matter root object (not nested under a `config` key).
 - `prompt_template`: trimmed Markdown body.
 
-### 5.3 Front Matter Schema
+### 5.1.3 Front Matter Schema
 
 Top-level keys:
 
 - `tracker`
 - `polling`
 - `workspace`
+- `repository`
+- `preparation`
 - `hooks`
 - `agent`
 - `codex`
@@ -379,7 +575,7 @@ Note:
 - Extensions SHOULD document their field schema, defaults, validation rules, and whether changes
   apply dynamically or require restart.
 
-#### 5.3.1 `tracker` (object)
+#### 5.1.3.1 `tracker` (object)
 
 Fields:
 
@@ -420,7 +616,7 @@ Fields:
   - MUST be neither active nor terminal. The driver records a provisioning blocker before moving a
     refused attempt to this state.
 
-#### 5.3.2 `polling` (object)
+#### 5.1.3.2 `polling` (object)
 
 Fields:
 
@@ -428,17 +624,82 @@ Fields:
   - Default: `30000`
   - Changes SHOULD be re-applied at runtime and affect future tick scheduling without restart.
 
-#### 5.3.3 `workspace` (object)
+#### 5.1.3.3 `workspace` (object)
 
 Fields:
 
+- `provider` (`directory`, `git-worktree`, or `harness`)
+  - Default: `directory`.
+  - `git-worktree` remains parseable for migration diagnostics, but daemon admission refuses it;
+    the managed driver is selected only by Section 5.0 binding composition.
+  - `harness` is compatibility-only and requires `hooks.after_create` plus
+    `hooks.before_remove`. New repository integrations MUST NOT select it.
 - `root` (path string or `$VAR`)
   - Default: `<system-temp>/symphony_workspaces`
   - `~` is expanded.
   - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
   - The effective workspace root is normalized to an absolute path before use.
 
-#### 5.3.4 `hooks` (object)
+#### 5.1.3.4 `repository` (object)
+
+Frozen compatibility shape superseded by the Section 5.0 product profile and binding:
+
+- `identity` (string `owner/repository`)
+  - REQUIRED when `workspace.provider: git-worktree`.
+  - MUST match the selected tracker provider's owner/repository when that adapter exposes them.
+  - The driver MUST independently verify both the accepted source checkout's configured Git `origin`
+    hostname and owner/repository against the tracker-resolved provider identity. The hostname is
+    derived from the tracker profile rather than duplicated in this object.
+- `base_ref` (full `refs/heads/*` or `refs/remotes/*` ref)
+  - REQUIRED for managed Git worktrees.
+  - Resolved from the accepted source checkout and pinned to a full immutable commit SHA before any
+    worktree mutation.
+- `branch_prefix` (safe relative Git namespace ending in `/`)
+  - REQUIRED for managed Git worktrees.
+  - MUST reject leading slash, `..`, `@{`, backslash, and other invalid/broadening forms.
+
+This object is not managed deployment authority. New integrations use the strict profile/binding
+split; positional compatibility startup MUST refuse this shape when it selects `git-worktree`.
+
+#### 5.1.3.5 `preparation` (object)
+
+Fields:
+
+- `driver` (`none` or `pnpm`)
+  - Default: `none`.
+  - `pnpm` requires a fenced WorkSession attempt and managed workspace.
+- `frozen_lockfile` (boolean)
+  - Default and only accepted value: `true`.
+- `lifecycle_scripts` (boolean)
+  - Default and only accepted value: `false`.
+- `timeout_ms` (positive integer)
+  - Default: `300000`.
+
+The built-in pnpm driver MUST fail closed if its exact operator-pinned sandbox, toolchain, or
+offline seed is unavailable. Before execution it MUST validate regular non-symlink root and
+workspace manifests, `pnpm-lock.yaml`, bounded `pnpm-workspace.yaml`/`.npmrc` inputs, the exact
+`packageManager` version, every locked registry source, and every SHA-512 integrity record. The
+first class MUST reject product pnpm hooks/configuration, runtime downloads, local/workspace/Git/SSH
+dependencies, arbitrary package URLs/tarballs, unsupported lockfile shapes, and concurrent input
+drift. It records manifest, lockfile, complete-input-set, command, and dependency-policy digests or
+a typed preflight refusal.
+
+Execution MUST use an attempt-private cache outside the worktree, a private writable snapshot of
+the trusted seed's package index, and read-only content-addressed seed bytes. Bubblewrap MUST create
+new user/mount/PID/network namespaces and expose only the managed worktree, private cache, exact
+read-only toolchain/system roots, ephemeral `/tmp`/`proc`/`dev`, and the read-only seed. The process
+receives a small explicit environment and no home, sibling repository, Symphony state,
+host-control socket, tracker, delivery, or proof credential/path. It MUST run offline with a frozen
+lockfile, store verification, lifecycle scripts and pnpm hooks disabled, runtime downloads disabled,
+and copy imports. It MUST NOT share host networking or fall back to an unsandboxed/online command.
+Cancellation and timeout MUST terminate the complete Bubblewrap process tree before returning.
+
+The managed worktree is the cleanup unit. Preparation cleanup requires the matching WorkSession
+controller generation and no active runtime lease, then removes only the exact recorded private
+cache subtree after realpath, containment, type, and symlink checks; it does not need product-owned
+receipts enumerating `node_modules` directories.
+
+#### 5.1.3.6 `hooks` (object)
 
 Fields:
 
@@ -462,7 +723,10 @@ Fields:
   - Invalid values fail configuration validation.
   - Changes SHOULD be re-applied at runtime for future hook executions.
 
-#### 5.3.5 `agent` (object)
+Managed `git-worktree` workflows MUST NOT define any lifecycle hook. Hooks remain valid for
+`directory` and the transitional `harness` compatibility provider.
+
+#### 5.1.3.7 `agent` (object)
 
 Fields:
 
@@ -481,21 +745,22 @@ Fields:
   - State keys are normalized (`trim + lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
-#### 5.3.6 `codex` (object)
+#### 5.1.3.8 `codex` (object)
 
 Fields:
 
-For Codex-owned config values such as `approval_policy`, `thread_sandbox`, and
-`turn_sandbox_policy`, supported values are defined by the targeted Codex app-server version.
-Implementors SHOULD treat them as pass-through Codex config values rather than relying on a
-hand-maintained enum in this spec. To inspect the installed Codex schema, run
-`codex app-server generate-json-schema --out <dir>` and inspect the relevant definitions referenced
-by `v2/ThreadStartParams.json` and `v2/TurnStartParams.json`. Implementations MAY validate these
-fields locally if they want stricter startup checks.
+For compatibility workspace modes, Codex-owned config values such as `approval_policy`,
+`thread_sandbox`, and `turn_sandbox_policy` remain protocol pass-through values defined by the
+targeted Codex app-server version. To inspect the installed schema, run
+`codex app-server generate-json-schema --out <dir>` and inspect the definitions referenced by
+`v2/ThreadStartParams.json` and `v2/TurnStartParams.json`.
+
+Managed Git does not consume this compatibility `codex` object. Its binding-owned launch and policy
+are fixed by Section 5.0.1 and cannot be supplied through product configuration.
 
 - `command` (string shell command)
   - Default: `codex app-server`
-  - The runtime launches this command via `bash -lc` in the workspace directory.
+  - Compatibility modes launch this command via `bash -lc` in the workspace directory.
   - The launched process MUST speak a compatible app-server protocol over stdio.
 - `approval_policy` (Codex `AskForApproval` value)
   - Default: implementation-defined.
@@ -511,7 +776,7 @@ fields locally if they want stricter startup checks.
   - Default: `300000` (5 minutes)
   - If `<= 0`, stall detection is disabled.
 
-### 5.4 Prompt Template Contract
+### 5.1.4 Prompt Template Contract
 
 The Markdown body of `WORKFLOW.md` is the per-issue prompt template.
 
@@ -536,7 +801,7 @@ Fallback prompt behavior:
 - Workflow file read/parse failures are configuration/validation errors and SHOULD NOT silently fall
   back to a prompt.
 
-### 5.5 Workflow Validation and Error Surface
+### 5.1.5 Workflow Validation and Error Surface
 
 Error classes:
 
@@ -583,10 +848,15 @@ Value coercion semantics:
 Dynamic reload is REQUIRED:
 
 - The software MUST detect `WORKFLOW.md` changes.
-- On change, it MUST re-read and re-apply workflow config and prompt template without restart.
-- The software MUST attempt to adjust live behavior to the new config (for example polling
-  cadence, concurrency limits, active/terminal states, codex settings, workspace paths/hooks, and
-  prompt content for future runs).
+- On change, it MUST re-read and either atomically re-apply the safe workflow fields or reject the
+  reload while retaining the last-known-good snapshot.
+- The software MUST adjust live behavior for polling cadence, concurrency limits, active/terminal
+  states, codex settings, preparation policy, compatibility hooks, and prompt content for future
+  runs.
+- Tracker/repository identity, the trusted repository profile, and workspace provider/root are host
+  topology. The Node implementation MUST reject their live change with an operator-visible
+  restart-required error because the open state store and repository drivers are bound to the
+  original topology.
 - Reloaded config applies to future dispatch, retry scheduling, reconciliation decisions, hook
   execution, and agent launches.
 - Implementations are not REQUIRED to restart in-flight agent sessions automatically when config
@@ -622,6 +892,11 @@ Validation checks:
 - The selected adapter accepts `tracker.provider` after documented defaults and `$VAR`
   resolution.
 - `codex.command` is present and non-empty.
+- `workspace.provider` is supported.
+- A managed Git-worktree workflow has a valid repository identity, tracker-resolved hostname, full
+  base ref, safe branch prefix, no lifecycle hooks, and an identity matching adapter scope.
+- `preparation.driver: pnpm` is selected only with the managed Git-worktree provider, retains a
+  frozen lockfile, disables lifecycle scripts, and has a positive timeout.
 
 ### 6.4 Core Config Fields Summary (Cheat Sheet)
 
@@ -637,6 +912,15 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.terminal_states`: list of provider-native state names, adapter-defined default
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
+- `workspace.provider`: `directory`, `git-worktree`, or compatibility-only `harness`; default
+  `directory`
+- `repository.identity`: `owner/repository`, REQUIRED for `git-worktree`
+- `repository.base_ref`: full `refs/heads/*` or `refs/remotes/*`, REQUIRED for `git-worktree`
+- `repository.branch_prefix`: safe namespace ending in `/`, REQUIRED for `git-worktree`
+- `preparation.driver`: `none` or `pnpm`, default `none`
+- `preparation.frozen_lockfile`: only `true`
+- `preparation.lifecycle_scripts`: only `false`
+- `preparation.timeout_ms`: positive integer, default `300000`
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
 - `hooks.after_run`: shell script or null
@@ -646,18 +930,20 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
-- `codex.command`: shell command string, default `codex app-server`
-- `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
-- `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
-- `codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
+- `codex.command`: compatibility shell command string
+- `codex.approval_policy`: compatibility Codex value
+- `codex.thread_sandbox`: compatibility Codex value
+- `codex.turn_sandbox_policy`: compatibility Codex value
 - `codex.turn_timeout_ms`: integer, default `3600000`
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`
 
 ## 7. Orchestration State Machine
 
-The orchestrator is the only component that mutates scheduling state. All worker outcomes are
-reported back to it and converted into explicit state transitions.
+The orchestrator is the only application component that requests scheduling transitions. Durable
+mutations go through `SymphonyStateStore`; all worker outcomes are reported back to the orchestrator
+and converted into explicit, transactional state changes. Process-local maps and timers are
+projections, not competing authority.
 
 ### 7.1 Issue Orchestration States
 
@@ -668,14 +954,15 @@ claim state.
    - Issue is not running and has no retry scheduled.
 
 2. `Claimed`
-   - Orchestrator has reserved the issue to prevent duplicate dispatch.
-   - In practice, claimed issues are either `Running` or `RetryQueued`.
+   - A WorkSession active attempt/runtime lease or durable retry reserves the issue from duplicate
+     dispatch.
+   - The in-memory `claimed` set mirrors that durable fact for fast selection.
 
 3. `Running`
    - Worker task exists and the issue is tracked in `running` map.
 
 4. `RetryQueued`
-   - Worker is not running, but a retry timer exists in `retry_attempts`.
+   - Worker is not running, but a durable retry intent exists; a timer may mirror its due time.
 
 5. `Released`
    - Claim removed because issue is terminal, non-active, missing, or retry path completed without
@@ -746,19 +1033,62 @@ Distinct terminal reasons are important because retry logic and logs differ.
 
 ### 7.4 Idempotency and Recovery Rules
 
-- The orchestrator serializes state mutations through one authority to avoid duplicate dispatch.
-- `claimed` and `running` checks are REQUIRED before launching any worker.
+- WorkSession mutation MUST be transactional. Human/controller edits use an expected WorkSession
+  revision; execution writes use the active attempt ID, runtime lease token, and controller
+  generation. Managed-workspace transitions additionally use their workspace lease token.
+- Acquiring a runtime lease MUST present the current controller generation and atomically refuse a
+  stale controller or any second active lease for the WorkSession, including when the existing
+  lease timestamp has expired and when two daemon processes race.
+- Reconciliation MUST list expired candidates without mutating them, prove the exact managed
+  descendant scope quiescent, then expire only the same attempt/token/generation in a fenced
+  transaction. Observation failure retains the active lease and blocks replacement dispatch.
+- `claimed` and `running` projection checks remain REQUIRED before requesting a lease, but they are
+  not sufficient authority by themselves.
 - Reconciliation runs before dispatch on every tick.
-- Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
+- Retry intent and external-effect intent MUST be durable before their timer/call is started.
+- External effects use stable idempotency keys. Their result is recorded after independently
+  observing the effect; no database transaction remains open across the external call.
+- Restart recovery begins from the WorkSession store and then cross-checks tracker,
+  Git/filesystem, and provider truth. Missing state cannot be reconstructed into cleanup authority.
 - Startup cleanup sweeps every terminal item, while successful normal polls clean newly observed
   terminal items whose worker claims have already been released.
+
+### 7.5 Durable State-Store Contract
+
+The Node managed implementation uses one SQLite database at `<stateRoot>/state.sqlite`, where
+`stateRoot` comes only from the operator binding and is disjoint from product and workspace roots.
+Compatibility deployments retain `<workspace.root>/.symphony/state.sqlite`. The containing state
+directory MUST be a real private directory (mode `0700` on POSIX) and the database MUST be a regular
+non-symlink private file (mode `0600` on POSIX). The main database is created with that mode before
+SQLite opens it so first-open `-wal` and `-shm` sidecars inherit the same private mode. Opening state through an unexpected file type or
+symlink MUST fail closed.
+
+The store MUST provide:
+
+- versioned, transactional schema migration;
+- foreign-key enforcement;
+- WAL journaling and a durability synchronization mode appropriate for restart authority;
+- bounded busy handling instead of unbounded hangs;
+- an integrity check on open that also decodes every aggregate/effect and rejects disagreement
+  between canonical documents and indexed relational projections;
+- immediate write transactions or equivalent serialization across processes;
+- monotonic row revisions and relational validation of decoded aggregate state;
+- a backup operation that refuses overwrite and produces a private, independently reopenable copy;
+- orderly close during daemon shutdown.
+
+State is committed before an associated external effect and its observed result is committed after
+the call. Reopening the database MUST be sufficient to discover active/expired leases, durable
+retries, managed workspace phases, running/interrupted preparation, and pending effects. Logs,
+tracker comments, workpads, candidate files, and legacy receipts MAY help explain or cross-check the
+record but MUST NOT replace it.
 
 ## 8. Polling, Scheduling, and Reconciliation
 
 ### 8.1 Poll Loop
 
-At startup, the service validates config, performs startup cleanup, schedules an immediate tick, and
-then repeats every `polling.interval_ms`.
+At startup, the service validates config, opens and checks the state store, expires stale runtime
+leases, restores durable retry admission from recorded due times, performs terminal cleanup reconciliation, schedules an
+immediate tick, and then repeats every `polling.interval_ms`.
 
 The effective poll interval SHOULD be updated when workflow config changes are re-applied.
 
@@ -813,14 +1143,17 @@ Per-state limit:
 - `max_concurrent_agents_by_state[state]` if present (state key normalized)
 - otherwise fallback to global limit
 
-The runtime counts issues by their current tracked state in the `running` map.
+The runtime counts issues by their current tracked state in the `running` map. The count controls
+capacity, while the transactional runtime lease remains the duplicate-execution guard.
 
 ### 8.4 Retry and Backoff
 
 Retry entry creation:
 
 - Cancel any existing retry timer for the same issue.
-- Store `attempt`, `identifier`, `error`, `due_at_ms`, and new timer handle.
+- Transactionally store `kind`, `attempt`, `error`, `due_at`, `recorded_at`, and the optional
+  fresh-attempt generation beneath the WorkSession.
+- Only after the durable write, install or replace the process timer as a wake-up projection.
 
 Backoff formula:
 
@@ -837,6 +1170,11 @@ Retry handling behavior:
    - Dispatch if slots are available.
    - Otherwise requeue with error `no available orchestrator slots`.
 5. If found but no longer active or routable, release claim without dispatch.
+
+After restart, overdue durable retries run as soon as capacity and tracker eligibility allow;
+future retries receive a timer for their remaining delay. Completing, cancelling, or releasing the
+WorkSession clears the matching durable retry transactionally. A stale worker must not overwrite a
+newer attempt's retry.
 
 Note:
 
@@ -873,7 +1211,9 @@ When the service starts:
 
 1. Clear the in-memory set of observed terminal issue IDs.
 2. Query the tracker for issues in terminal states.
-3. For each returned issue, invoke workspace cleanup and record its opaque issue ID as observed.
+3. For each returned issue, invoke the selected repository driver's cleanup and record its opaque
+   issue ID as observed. A managed driver may remove only a workspace named by a matching durable
+   lease; absence or ambiguity retains it.
 4. If the terminal-issues fetch fails, log a warning and continue startup with an empty observed
    set so a later successful poll can recover.
 
@@ -912,51 +1252,83 @@ Workspace persistence:
 
 ### 9.2 Workspace Creation and Reuse
 
-Input: `issue.identifier`
+Input: `issue`, selected RepositoryDriver, pinned managed or trusted compatibility snapshot, and
+fenced Attempt authority.
 
 Algorithm summary:
 
 1. Derive `workspace_key` using Section 4.2, including the stable original-identifier hash when
    sanitization changes the identifier.
 2. Compute workspace path under workspace root.
-3. Ensure the workspace path exists as a directory.
-4. Mark `created_now=true` only if the directory was created during this call; otherwise
-   `created_now=false`.
-5. If `created_now=true`, run `after_create` hook if configured.
+3. Delegate provision/inspect/reuse to the selected driver.
+4. Record the typed workspace lease on the Attempt before treating the path as usable.
+5. Independently assert that the coding-agent `cwd` is the exact authorized workspace path.
 
 Notes:
 
-- This section does not assume any specific repository/VCS workflow.
-- Workspace preparation beyond directory creation (for example dependency bootstrap, checkout/sync,
-  code generation) is implementation-defined and is typically handled via hooks.
+- `directory` preserves the original create-directory behavior and optional hooks.
+- `harness` preserves the repository-owned lifecycle only for compatibility consumers.
+- `git-worktree` uses the built-in managed contract in Section 9.3.
+- Dependency preparation is a separate PreparationDriver step; it is not a RepositoryDriver hook.
 
-### 9.3 OPTIONAL Workspace Population (Implementation-Defined)
+### 9.3 RepositoryDriver and managed Git-worktree contract
 
-The spec does not require any built-in VCS or repository bootstrap behavior.
+Symphony exposes one internal RepositoryDriver port for prepare, fresh-attempt prepare/ready,
+before-run/after-run compatibility operations, launch-`cwd` assertion, and guarded removal.
+Managed composition selects the driver from the validated operator binding plus accepted product
+profile; candidate code cannot select or replace it.
 
-Implementations MAY populate or synchronize the workspace using implementation-defined logic and/or
-hooks (for example `after_create` and/or `before_run`).
+For `workspace.provider: git-worktree`, the driver MUST:
 
-Failure handling:
+1. Use the binding's independently validated accepted source repository, not candidate input.
+2. Verify that its configured `origin` normalizes to `repository.identity`.
+3. Resolve `repository.base_ref` to one full immutable commit SHA on the WorkSession's first managed
+   allocation. Persist the repository profile, host roots, workspace location, base ref, and base
+   SHA as one WorkSession invariant. Every later Attempt in that WorkSession MUST reuse the pinned
+   SHA and MUST NOT re-resolve a mutable ref.
+4. Derive a collision-safe branch under the binding's branch prefix using WorkSession identity and,
+   when present, a digest of the entire fresh-attempt generation.
+5. Transactionally record an `allocating` managed workspace lease plus stable worktree-effect
+   idempotency key before invoking Git.
+6. Invoke the binding's exact Git executable with ambient `GIT_*` authority removed, system/global
+   configuration and attributes disabled, replacement objects disabled, hooks and fsmonitor fixed
+   off, and recursive submodule behavior fixed off. Refuse any effective repository
+   `filter.*.(clean|smudge|process)` command before allocating the workspace. `git worktree add`
+   MUST therefore neither execute a product hook/filter nor inherit a caller-selected Git target.
+7. After the Git effect, independently verify the registered worktree path, common Git directory,
+   exact branch, source repository, base SHA/profile facts, and realpath containment before marking
+   the lease `ready`.
+8. On restart, reconcile an allocating/provisioned lease with observed Git state. An exactly
+   matching completed effect may be adopted into the recorded transition; an unrecorded existing
+   directory or ambiguous registration MUST be refused, not claimed.
+9. Reuse only a ready lease whose immutable repository/profile/generation facts match. Transfer
+   ownership atomically by marking the previous Attempt lease `superseded` while recording the new
+   Attempt lease; the aggregate MUST NOT expose two live leases for one path or branch.
+10. For cleanup, require the matching WorkSession identity and controller generation with no active
+    runtime lease, record `removal_pending`, re-verify lease token, root containment, path, Git
+    common directory, registration, branch, and cleanliness, then remove the registered worktree
+    and exact branch. A mismatch, dirty tree, symlink, broadened path, or ambiguous Git result
+    marks/retains the workspace with an actionable refusal.
 
-- Workspace population/synchronization failures return an error for the current attempt.
-- If failure happens while creating a brand-new workspace, implementations MAY remove the partially
-  prepared directory.
-- Reused workspaces SHOULD NOT be destructively reset on population failure unless that policy is
-  explicitly chosen and documented.
+The driver MUST NOT fetch from an unapproved remote, choose proof, push, merge, or execute package
+manager/build commands. Those concerns belong to their separate owners.
 
 #### 9.3.1 Fresh-attempt extension
 
 When `tracker.fresh_attempt_states` is configured, the implementation MUST derive a filesystem-safe
-generation from the opaque issue ID and `state_version`. It MUST keep a strict durable receipt under
-the workspace root but outside the agent workspace with phases `provisioned` and `ready`.
+generation from the opaque issue ID and `state_version` and bind it to durable Attempt/workspace
+state outside the agent workspace.
 
-For a new generation, a harness-owned workspace reset MUST be explicit and guarded: invoke
-`before_remove` with `SYMPHONY_RUN_STATUS=fresh_attempt_reset` and
-`SYMPHONY_ATTEMPT_GENERATION=<generation>`, require successful repository-owned removal, provision
-the new workspace, delete only the provider's managed Agent Workpad, then mark the receipt `ready`.
-A restart at `provisioned` finishes the workpad reset; a restart or internal retry at matching
-`ready` reuses the new attempt and MUST NOT delete its workpad again.
+For the managed driver, the same generation reuses the exact ready managed worktree. A changed
+generation may replace only the previous managed lease after the guarded removal contract succeeds;
+it then allocates a collision-safe new branch/worktree and deletes only the provider's managed Agent
+Workpad before marking the generation ready. Restart after the Git effect or workpad deletion MUST
+resume from durable lease/outbox state without allocating a second branch or deleting the workpad
+twice.
+
+For compatibility `harness` mode only, the existing strict receipt plus `before_remove` reset
+protocol remains valid. It is not permitted for a new consumer and does not become authority for a
+managed workspace.
 
 If any fresh preflight step cannot be proven, the coding agent MUST NOT start. The tracker adapter
 MUST upsert the exact blocker before moving the card to `fresh_attempt_failure_state`. Failure of
@@ -964,6 +1336,9 @@ that tracker handoff creates a `fresh_handoff` retry which may retry only the ha
 state version invalidates workers and retries from the earlier generation.
 
 ### 9.4 Workspace Hooks
+
+Hooks are a `directory`/`harness` compatibility contract. A managed Git-worktree workflow defines
+none; configuration validation MUST refuse such a combination.
 
 Supported hooks:
 
@@ -1010,6 +1385,21 @@ Invariant 3: Workspace key is sanitized.
 - If replacement changes the identifier, append a stable original-identifier hash suffix with at
   least 64 bits of entropy so keys remain collision-resistant after sanitization.
 
+Invariant 4: Managed cleanup requires two kinds of agreement.
+
+- Symphony's durable managed lease must name the exact repository, profile digest, source root,
+  workspace root/path, branch, and lease token.
+- Independent realpath and Git observations must match those facts immediately before mutation.
+- Filesystem/Git observation without a lease is never sufficient removal authority.
+
+Invariant 5: Human attachments are outside workspace ownership.
+
+- The interactive extension records `HumanWorkspaceAttachment` only on the WorkSession root; it
+  MUST NOT create an Attempt workspace lease.
+- RepositoryDriver cleanup and materialization accept only managed/compatibility lease types, so a
+  human attachment is mechanically unrepresentable as their target regardless of cleanliness or
+  controller request.
+
 ## 10. Agent Runner Protocol (Coding Agent Integration)
 
 This section defines Symphony's language-neutral responsibilities when integrating a Codex
@@ -1030,14 +1420,16 @@ Protocol source of truth:
 
 Subprocess launch parameters:
 
-- Command: `codex.command`
-- Invocation: `bash -lc <codex.command>`
+- Compatibility command: `codex.command`
+- Compatibility invocation: `bash -lc <codex.command>`
+- Managed invocation: the exact Section 5.0.1 `systemd-run --user --scope ... -- <codex>
+app-server` argument vector, with no shell or environment expansion
 - Working directory: workspace path
 - Transport/framing: the protocol transport required by the targeted Codex app-server version
 
 Notes:
 
-- The default command is `codex app-server`.
+- The compatibility default command is `codex app-server`; a managed binding pins the executable.
 - Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
   using fields supported by the targeted Codex app-server version.
 
@@ -1052,7 +1444,8 @@ Reference: https://developers.openai.com/codex/app-server/
 Startup MUST follow the targeted Codex app-server contract. Symphony additionally requires the
 client to:
 
-- Start the app-server subprocess in the per-issue workspace.
+- Start the app-server subprocess in the per-issue workspace and, for managed Git, inside the
+  Attempt's deterministic descendant scope.
 - Initialize the app-server session using the targeted Codex app-server protocol.
 - Create or resume a coding-agent thread according to the targeted protocol.
 - Supply the absolute per-issue workspace path as the thread/turn working directory wherever the
@@ -1098,6 +1491,10 @@ Transport handling requirements:
 - Follow the transport and framing rules of the targeted Codex app-server version.
 - For stdio-based transports, keep protocol stream handling separate from diagnostic stderr
   handling unless the targeted protocol specifies otherwise.
+- Managed finalization MUST close/interrupt the app server, terminate the complete configured
+  systemd scope with bounded TERM/KILL escalation, and observe the scope absent or inactive with an
+  empty control group. Failure MUST surface as `runtime_quiescence_refused`, preserve the active
+  Attempt lease, and prevent retry/replacement until reconciliation proves quiescence.
 
 ### 10.4 Emitted Runtime Events (Upstream to Orchestrator)
 
@@ -1229,11 +1626,15 @@ The `Agent Runner` wraps workspace + prompt + app-server client.
 
 Behavior:
 
-1. Create/reuse an ordinary workspace, or complete the configured fresh-attempt preflight.
-2. Build prompt from workflow template.
-3. Start app-server session only after workspace and tracker preflight succeeds.
-4. Forward app-server events to orchestrator.
-5. On an ordinary error, fail the worker attempt for normal retry. Return a typed
+1. Receive a fenced WorkSession/Attempt authority from the orchestrator.
+2. Ask the selected RepositoryDriver to create/reuse an ordinary workspace or complete the
+   configured fresh-attempt preflight.
+3. Run the selected PreparationDriver and durably record its outcome.
+4. Build prompt from workflow template.
+5. Start app-server session only after workspace, preparation, and tracker preflight succeeds.
+6. Forward app-server events to the orchestrator with runtime correlation; transport IDs never
+   replace Attempt identity.
+7. On an ordinary error, fail the worker attempt for normal retry. Return a typed
    `fresh_attempt_refused` error for preflight refusal so the orchestrator performs only the human
    handoff.
 
@@ -1712,11 +2113,23 @@ API design notes:
 
 2. `Workspace Failures`
    - Workspace directory creation failure
-   - Workspace population/synchronization failure (implementation-defined; can come from hooks)
+   - Managed Git identity, allocation, recovery, or cleanup refusal
+   - Compatibility hook population/synchronization failure
    - Invalid workspace path configuration
    - Hook timeout/failure
 
-3. `Agent Session Failures`
+3. `State Store Failures`
+   - Database path/type/permission refusal
+   - Migration or integrity-check failure
+   - Busy/transaction failure
+   - Stale revision, controller generation, runtime lease, workspace lease, or effect conflict
+
+4. `Preparation Failures`
+   - Missing or linked manifest/lockfile
+   - Missing sandbox or package-manager executable
+   - Frozen install failure, timeout, cancellation, or cleanup refusal
+
+5. `Agent Session Failures`
    - Startup handshake failure
    - Turn failed/cancelled
    - Turn timeout
@@ -1724,13 +2137,13 @@ API design notes:
    - Subprocess exit
    - Stalled session (no activity)
 
-4. `Tracker Failures`
+6. `Tracker Failures`
    - Provider transport errors
    - Non-success provider responses
    - Provider-reported application errors
    - Malformed payloads
 
-5. `Observability Failures`
+7. `Observability Failures`
    - Snapshot timeout
    - Dashboard render errors
    - Log sink configuration failure
@@ -1745,6 +2158,17 @@ API design notes:
 - Worker failures:
   - Convert to retries with exponential backoff.
 
+- State integrity/migration failures:
+  - Refuse startup or the affected mutation; do not fall back to tracker/comments/filesystem as a
+    replacement state writer.
+
+- Managed-workspace ambiguity:
+  - Retain the workspace and record/log an actionable refusal; do not broaden cleanup.
+
+- Preparation setup refusal/failure:
+  - Record its four-way status before failing the attempt; never retry outside the configured
+    sandbox as a fallback.
+
 - Tracker candidate-fetch failures:
   - Skip this tick.
   - Try again on next tick.
@@ -1758,33 +2182,40 @@ API design notes:
 
 ### 14.3 Partial State Recovery (Restart)
 
-Current design is intentionally in-memory for scheduler state.
-Restart recovery means the service can resume useful operation by polling tracker state and reusing
-preserved workspaces. It does not mean retry timers, running sessions, or live worker state survive
-process restart.
+WorkSession state is durable. Process-local workers, Codex processes, and timer handles are not.
+Restart recovery means the service resumes or safely refuses from the state-store records and then
+reconciles external facts with their semantic owners.
 
 After restart:
 
-- No retry timers are restored from prior process memory.
-- No running sessions are assumed recoverable.
-- Service recovers by:
-  - startup terminal workspace cleanup
-  - fresh polling of active and terminal issues
-  - re-dispatching eligible work
+- Expired active runtime leases are listed as reconciliation candidates. Managed descendants are
+  terminated and proven absent before the exact attempt/token/generation is marked
+  expired/interrupted and permanently fenced. Failure retains the active lease and blocks a new
+  Attempt.
+- Durable retry intents remain visible to normal polling and cannot be admitted before their
+  recorded due times; overdue intents are considered on the first eligible poll.
+- No Codex process/thread is assumed recoverable merely because its correlation ID was recorded.
+- Pending external-effect intents are reconciled by stable idempotency key and independent provider
+  observation before retry or completion.
+- Managed worktree leases are checked against Git/filesystem truth. An exact recorded effect may be
+  completed; missing or ambiguous authority retains/refuses.
+- Tracker polling refreshes authorization and terminal facts; it cannot invent a WorkSession lease.
 
 ### 14.4 Operator Intervention Points
 
 Operators can control behavior by:
 
-- Editing `WORKFLOW.md` (prompt and most runtime settings).
-- `WORKFLOW.md` changes are detected and re-applied automatically without restart according to
-  Section 6.2.
+- Replacing an operator-owned managed binding and restarting cleanly to accept a new product
+  revision or host topology.
+- Editing compatibility `WORKFLOW.md`; those changes are detected and re-applied automatically
+  without restart according to Section 6.2.
 - Changing issue states in the tracker:
   - terminal state -> running session is stopped and workspace cleaned when reconciled
   - non-active state -> running session is stopped without cleanup
 - Restarting the service for process recovery, deployment, or an operator-requested retry of a
   retained terminal workspace after its guarded teardown has been repaired. Restart is not the
-  normal path for observing a terminal transition or applying workflow config changes.
+  normal path for observing a terminal transition. It is required for managed binding/profile
+  changes but not for compatibility workflow edits.
 
 ## 15. Security and Operational Safety
 
@@ -1808,6 +2239,10 @@ Mandatory:
 - Workspace path MUST remain under configured workspace root.
 - Coding-agent cwd MUST be the per-issue workspace path for the current run.
 - Workspace directory names MUST use sanitized identifiers.
+- The state database and preparation caches MUST remain outside candidate worktree paths and be
+  private to the service identity.
+- State/database/cache paths MUST refuse symlinks and unexpected entry types before use or removal.
+- Managed removal MUST require a matching durable lease plus independent Git/filesystem identity.
 
 RECOMMENDED additional hardening for ports:
 
@@ -1829,7 +2264,8 @@ RECOMMENDED additional hardening for ports:
 
 ### 15.4 Hook Script Safety
 
-Workspace hooks are arbitrary shell scripts from `WORKFLOW.md`.
+Workspace hooks are arbitrary shell scripts from `WORKFLOW.md` and exist only on compatibility
+drivers. Managed Git-worktree workflows MUST reject them.
 
 Implications:
 
@@ -1838,7 +2274,39 @@ Implications:
 - Hook output SHOULD be truncated in logs.
 - Hook timeouts are REQUIRED to avoid hanging the orchestrator.
 
-### 15.5 Harness Hardening Guidance
+### 15.4.1 Managed Git process safety
+
+Managed repository lifecycle MUST use the operator binding's exact Git executable. Every invocation
+MUST drop ambient `GIT_*` variables, global/system config and attributes, replacement objects,
+interactive prompts, hooks, fsmonitor, and recursive submodules. Effective repository clean,
+smudge, and long-running filter commands are unsupported and MUST be detected before workspace
+allocation. A refusal creates no managed-workspace directory and executes no product-controlled
+hook or filter.
+
+### 15.5 Managed preparation safety
+
+The pnpm preparation subprocess executes repository-derived package metadata, even with lifecycle
+scripts disabled, so it is a distinct hostile-execution boundary.
+
+- It MUST fail closed when the configured sandbox cannot start.
+- It MUST inherit an explicit environment allowlist, not the Symphony parent environment.
+- It MUST NOT see tracker, Git hosting, WCP, delivery, SSH, home-directory, sibling-repository,
+  Symphony-state, or host-control credentials/paths.
+- It MUST mount only the managed worktree, its attempt-private cache, required read-only
+  toolchain/system roots, the operator-pinned read-only dependency seed, and ephemeral `/tmp`,
+  `/proc`, and `/dev` surfaces.
+- It MUST use a new network namespace with no host/private/metadata route. The first pnpm class is
+  offline-only; a missing seed object is a refusal/failure, never authority to enable host network.
+- It MUST validate every package source and SHA-512 integrity plus all package-manager control
+  inputs before execution, record the dependency-policy identity/digest, and reject input or policy
+  drift on a previously bound Attempt.
+- It MUST use frozen lockfile semantics, disable lifecycle scripts, pnpm hooks, and runtime
+  downloads, verify store integrity, and copy packages out of read-only seed bytes.
+- Cancellation and timeout MUST terminate detached descendants before terminal preparation state
+  is recorded.
+- Output recorded in state/logs MUST be bounded and secret-redacted.
+
+### 15.6 Harness Hardening Guidance
 
 Running Codex agents against repositories, issue trackers, and other inputs that can contain
 sensitive data or externally-controlled content can be dangerous. A permissive deployment can lead
@@ -1873,8 +2341,29 @@ treat harness hardening as part of the core safety model rather than an optional
 ```text
 function start_service():
   configure_logging()
-  start_observability_outputs()
-  start_workflow_watch(on_change=reload_and_reapply_workflow)
+
+  source = resolve_cli_source()
+  if source is managed_binding:
+    workflow_snapshot = resolve_exact_profile_context_and_binding(source)
+  else:
+    workflow_snapshot = load_compatibility_workflow(source)
+    if workflow_snapshot.workspace_provider is managed_git:
+      fail_startup("managed Git requires deployment binding")
+
+  validation = validate_dispatch_config()
+  if validation is not ok:
+    log_validation_error(validation)
+    fail_startup(validation)
+
+  if workspace_provider is managed_git:
+    validate_source_origin_base_executables_and_roots_read_only()
+    if source, state, and workspace roots are not pairwise disjoint:
+      fail_startup_without_creating_state_or_workspace_paths()
+
+  state_store = open_and_validate_state_store(selected_state_database_path())
+  for lease in state_store.list_expired_runtime_leases(now_utc()):
+    if agent_runtime.prove_quiescent(lease.work_session_id, lease.controller_generation):
+      state_store.expire_runtime_lease(lease, now_utc())
 
   state = {
     poll_interval_ms: get_config_poll_interval_ms(),
@@ -1888,12 +2377,12 @@ function start_service():
     codex_rate_limits: null
   }
 
-  validation = validate_dispatch_config()
-  if validation is not ok:
-    log_validation_error(validation)
-    fail_startup(validation)
-
+  make_durable_retries_visible_to_polling(state_store, state)
   startup_terminal_workspace_cleanup()
+  make_pending_effects_visible_to_owning_reconciliation(state_store)
+  start_observability_outputs()
+  if source is compatibility_workflow:
+    start_workflow_watch(on_change=reload_and_reapply_workflow)
   schedule_tick(delay_ms=0)
 
   event_loop(state)
@@ -1904,6 +2393,13 @@ function start_service():
 ```text
 on_tick(state):
   state = reconcile_running_issues(state)
+
+  for lease in state_store.list_expired_runtime_leases(now_utc()):
+    if not agent_runtime.prove_quiescent(lease.work_session_id, lease.controller_generation):
+      log_error("retain lease; quiescence unproven")
+      schedule_tick(state.poll_interval_ms)
+      return state
+    state_store.expire_runtime_lease(lease, now_utc())
 
   validation = validate_dispatch_config()
   if validation is not ok:
@@ -1976,12 +2472,30 @@ function reconcile_running_issues(state):
 
 ```text
 function dispatch_issue(issue, state, attempt):
+  work_session = state_store.get_or_create_tracker_session(
+    tracker_kind,
+    repository_identity,
+    issue,
+    pinned_doctrine_snapshot
+  )
+
+  authority = state_store.start_attempt(
+    work_session.id,
+    controller_generation=work_session.controller.generation,
+    holder_id=daemon_instance_id,
+    tracker_attempt=attempt,
+    lease_expires_at=now_utc() + runtime_lease_duration
+  )
+  if authority refused because another lease is active:
+    return state
+
   worker = spawn_worker(
-    fn -> run_agent_attempt(issue, attempt, parent_orchestrator_pid) end
+    fn -> run_agent_attempt(issue, attempt, authority, parent_orchestrator_pid) end
   )
 
   if worker spawn failed:
-    return schedule_retry(state, issue.id, next_attempt(attempt), {
+    state_store.finish_attempt(authority, status="failed", error="failed to spawn agent")
+    return schedule_retry_durably(state, work_session.id, issue.id, next_attempt(attempt), {
       identifier: issue.identifier,
       error: "failed to spawn agent"
     })
@@ -1991,6 +2505,10 @@ function dispatch_issue(issue, state, attempt):
     monitor_handle,
     identifier: issue.identifier,
     issue,
+    work_session_id: work_session.id,
+    attempt_id: authority.attempt_id,
+    runtime_lease_token: authority.runtime_lease_token,
+    controller_generation: authority.controller_generation,
     session_id: null,
     codex_app_server_pid: null,
     last_codex_message: null,
@@ -2014,17 +2532,27 @@ function dispatch_issue(issue, state, attempt):
 ### 16.5 Worker Attempt (Workspace + Prompt + Agent)
 
 ```text
-function run_agent_attempt(issue, attempt, orchestrator_channel):
-  workspace = workspace_manager.create_for_issue(issue.identifier)
+function run_agent_attempt(issue, attempt, authority, orchestrator_channel):
+  workspace = repository_driver.prepare(issue, workflow_snapshot, authority)
   if workspace failed:
     fail_worker("workspace error")
 
-  if run_hook("before_run", workspace.path) failed:
-    fail_worker("before_run hook error")
+  prepared = preparation_driver.prepare(issue, workspace, workflow_snapshot, authority)
+  if prepared failed or refused:
+    fail_worker("preparation error")
 
-  session = app_server.start_session(workspace=workspace.path)
+  repository_driver.before_run(issue, workspace, workflow_snapshot, authority)
+  repository_driver.assert_agent_launch_cwd(workspace, workspace.path)
+
+  managed_runtime = agent_runtime.open(workspace, authority)
+  session = app_server.start_session(
+    workspace=workspace.path,
+    command=managed_runtime.command,
+    environment=managed_runtime.environment,
+    sandbox_policy=managed_runtime.sandbox_policy
+  )
   if session failed:
-    run_hook_best_effort("after_run", workspace.path)
+    repository_driver.after_run_best_effort(issue, workspace, authority, "failed")
     fail_worker("agent session startup error")
 
   max_turns = config.agent.max_turns
@@ -2034,7 +2562,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
     prompt = build_turn_prompt(workflow_template, issue, attempt, turn_number, max_turns)
     if prompt failed:
       app_server.stop_session(session)
-      run_hook_best_effort("after_run", workspace.path)
+      repository_driver.after_run_best_effort(issue, workspace, authority, "failed")
       fail_worker("prompt error")
 
     turn_result = app_server.run_turn(
@@ -2046,13 +2574,13 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
 
     if turn_result failed:
       app_server.stop_session(session)
-      run_hook_best_effort("after_run", workspace.path)
+      repository_driver.after_run_best_effort(issue, workspace, authority, "failed")
       fail_worker("agent turn error")
 
     refreshed_issue = tracker.fetch_issues_by_ids([issue.id])
     if refreshed_issue failed:
       app_server.stop_session(session)
-      run_hook_best_effort("after_run", workspace.path)
+      repository_driver.after_run_best_effort(issue, workspace, authority, "failed")
       fail_worker("issue state refresh error")
 
     if refreshed_issue is empty:
@@ -2069,7 +2597,11 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
     turn_number = turn_number + 1
 
   app_server.stop_session(session)
-  run_hook_best_effort("after_run", workspace.path)
+  if managed_runtime.prove_quiescent() failed:
+    repository_driver.after_run_best_effort(issue, workspace, authority, "failed")
+    fail_worker("runtime_quiescence_refused")
+  managed_runtime.cleanup_private_state()
+  repository_driver.after_run_best_effort(issue, workspace, authority, "succeeded")
 
   exit_normal()
 ```
@@ -2081,17 +2613,37 @@ on_worker_exit(issue_id, reason, state):
   running_entry = state.running.remove(issue_id)
   state = add_runtime_seconds_to_totals(state, running_entry)
 
+  if reason == runtime_quiescence_refused:
+    log_error("retain active Attempt and runtime lease")
+    state.claimed.remove(issue_id)
+    notify_observers()
+    return state
+
+  state_store.finish_attempt(
+    work_session_id=running_entry.work_session_id,
+    attempt_id=running_entry.attempt_id,
+    runtime_lease_token=running_entry.runtime_lease_token,
+    controller_generation=running_entry.controller_generation,
+    status=normalize_attempt_outcome(reason)
+  )
+
   if reason == normal:
     state.completed.add(issue_id)  # bookkeeping only
-    state = schedule_retry(state, issue_id, 1, {
+    state = schedule_retry_durably(state, running_entry.work_session_id, issue_id, 1, {
       identifier: running_entry.identifier,
       delay_type: continuation
     })
   else:
-    state = schedule_retry(state, issue_id, next_attempt_from(running_entry), {
-      identifier: running_entry.identifier,
-      error: format("worker exited: %reason")
-    })
+    state = schedule_retry_durably(
+      state,
+      running_entry.work_session_id,
+      issue_id,
+      next_attempt_from(running_entry),
+      {
+        identifier: running_entry.identifier,
+        error: format("worker exited: %reason")
+      }
+    )
 
   notify_observers()
   return state
@@ -2105,10 +2657,16 @@ on_retry_timer(issue_id, state):
 
   refreshed = tracker.fetch_issues_by_ids([issue_id])
   if fetch failed:
-    return schedule_retry(state, issue_id, retry_entry.attempt + 1, {
+    return schedule_retry_durably(
+      state,
+      retry_entry.work_session_id,
+      issue_id,
+      retry_entry.attempt + 1,
+      {
       identifier: retry_entry.identifier,
       error: "retry refresh failed"
-    })
+      }
+    )
 
   issue = find_by_id(refreshed, issue_id)
   if issue is null:
@@ -2120,10 +2678,16 @@ on_retry_timer(issue_id, state):
     return state
 
   if no_available_slots(state):
-    return schedule_retry(state, issue_id, retry_entry.attempt + 1, {
+    return schedule_retry_durably(
+      state,
+      retry_entry.work_session_id,
+      issue_id,
+      retry_entry.attempt + 1,
+      {
       identifier: issue.identifier,
       error: "no available orchestrator slots"
-    })
+      }
+    )
 
   return dispatch_issue(issue, state, attempt=retry_entry.attempt)
 ```
@@ -2162,10 +2726,29 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `~` path expansion works
 - `codex.command` is preserved as a shell command string
 - Per-state concurrency override map normalizes state names and ignores invalid values
+- Managed repository config validates identity, full base ref, safe branch prefix, tracker-scope
+  identity match, and absence of lifecycle hooks
+- Pnpm preparation config accepts only frozen lockfile plus disabled lifecycle scripts and requires
+  the managed Git-worktree provider
 - Prompt template renders `issue` and `attempt`
 - Prompt rendering fails on unknown variables (strict mode)
 
-### 17.2 Workspace Manager and Safety
+### 17.2 State, Repository, Preparation, and Workspace Safety
+
+- State database creation uses a private real directory/file and refuses symlink/unexpected types
+- Schema migration and integrity checks are transactional and fail closed on corruption
+- One tracker origin creates/reuses one WorkSession; attempts receive stable child identities
+- The v1→v2 migration moves only stopped attached checkouts to session-level human attachments and
+  rolls back rather than reclassifying an active attached Attempt
+- Accepted profile/context/binding inputs pin once; concurrent controller edits use the expected
+  WorkSession revision
+- Human attachment creates no Attempt/lease, conflicts across active sessions, and blocks Attempt
+  admission
+- Two processes racing to start an attempt produce exactly one active runtime lease
+- Expired runtime tokens and stale controller generations cannot mutate attempt/workspace state
+- Durable retry intent survives reopen and restores its due-time behavior
+- External-effect idempotency keys reuse the same intent and refuse conflicting payloads
+- Backup creates a private non-overwriting database copy that reopens with equivalent state
 
 - Deterministic workspace path per issue identifier
 - Missing workspace directory is created
@@ -2182,6 +2765,28 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Identifiers unchanged by sanitization keep their deterministic workspace key; conformance tests
   include distinct identifiers that sanitize to the same text and verify distinct keys
 - Agent launch uses the per-issue workspace path as cwd and rejects out-of-root paths
+- If the managed Git-worktree driver is implemented:
+  - allocation is recorded before Git mutation and a crash after `git worktree add` recovers the
+    same worktree rather than creating another
+  - origin identity, full base SHA, collision-safe branch, Git common directory, registration, and
+    realpath containment are verified independently
+  - the same fresh generation reuses its worktree; a changed generation replaces only the proven
+    prior managed lease
+  - unrecorded directories, dirty worktrees, symlinks, branch/path/common-dir mismatch, and
+    ambiguous removal are retained with refusal
+- If pnpm preparation is implemented:
+  - root/workspace manifests and lockfile/config inputs are regular in-workspace files whose
+    individual and complete-set digests are recorded
+  - custom URL/Git/SSH/file/workspace sources, arbitrary tarballs, pnpm hooks/config, missing
+    SHA-512 integrity, and dependency-policy drift are refused
+  - the exact command is offline, frozen, script/hook/runtime-download-disabled, and lifecycle
+    marker fixtures do not execute
+  - the sandbox sees only its worktree/private cache/minimum toolchain/read-only seed, receives a
+    small environment, and cannot read a planted sibling/home/state secret or mutate seed bytes
+  - host localhost, private, link-local, and metadata endpoints are unreachable
+  - missing/refusing sandbox or seed has no unsandboxed or shared-network fallback
+  - cancellation/timeout remove detached descendants before return; status survives restart and
+    cleanup removes only the exact private cache subtree
 
 ### 17.3 Issue Tracker Adapter
 
@@ -2217,7 +2822,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Normal worker exit schedules a short continuation retry (attempt 1)
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
-- Retry queue entries include attempt, due time, identifier, and error
+- Retry queue entries durably include kind, attempt, due/recorded times, error, and fresh generation
+- Restart restores future/overdue retry behavior without a second active runtime lease
 - Stall detection kills stalled sessions and schedules retry
 - Slot exhaustion requeues retries with explicit error reason
 - If a snapshot API is implemented, it returns running rows, retry rows, token totals, and rate
@@ -2267,12 +2873,19 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.7 CLI and Host Lifecycle
 
+- CLI accepts `--binding path-to-deployment-binding.json` for managed Git and refuses combining it
+  with a positional workflow
+- managed Git refuses positional/default `WORKFLOW.md` authority
 - CLI accepts a positional workflow path argument (`path-to-WORKFLOW.md`)
-- CLI uses `./WORKFLOW.md` when no workflow path argument is provided
+- CLI uses `./WORKFLOW.md` when no source is provided, for compatibility only
 - CLI errors on nonexistent explicit workflow path or missing default `./WORKFLOW.md`
 - CLI surfaces startup failure cleanly
+- CLI opens the state store before orchestration, closes it on shutdown, and refuses an unsafe or
+  corrupt database path
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
+- managed shutdown/recovery proves the deterministic descendant scope empty before a runtime lease
+  is released or expired
 
 ### 17.8 Real Integration Profile (RECOMMENDED)
 
@@ -2281,6 +2894,8 @@ network access, or external service permissions are unavailable.
 
 - A real tracker smoke test can be run with valid credentials supplied through the selected
   adapter's documented secret mechanism.
+- A managed-worktree smoke test correlates one WorkSession/Attempt/lease with the exact source root,
+  base SHA, branch, worktree path, preparation record, and terminal cleanup result.
 - Real integration tests SHOULD use isolated test identifiers/workspaces and clean up tracker
   artifacts when practical.
 - A skipped real-integration test SHOULD be reported as skipped, not silently treated as passed.
@@ -2297,17 +2912,21 @@ Use the same validation profiles as Section 17:
 
 ### 18.1 REQUIRED for Conformance
 
-- Workflow path selection supports explicit runtime path and cwd default
-- `WORKFLOW.md` loader with YAML front matter + prompt body split
+- Managed source selection supports an exact operator binding; compatibility path selection
+  supports an explicit workflow and cwd default
+- Strict repository-profile/deployment-binding resolver plus compatibility `WORKFLOW.md` loader
 - Typed config layer with defaults and `$` resolution
-- Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
-- Polling orchestrator with single-authority mutable state
+- Pinned managed configuration plus dynamic compatibility `WORKFLOW.md` reload/re-apply
+- Polling orchestrator whose durable mutations pass through one transactional WorkSession store
+- WorkSession aggregate with tracker/interactive origins, revisions, pinned inputs, decisions,
+  session-level human attachments, attempts, runtime/workspace leases, durable retries,
+  materialization/proof/delivery records, effect intents, integrity checks, migrations, and backup
 - Issue tracker adapter with state-list + ID-refresh reads
 - Workspace manager with sanitized, collision-resistant per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
 - Coding-agent app-server subprocess client with the targeted transport/framing protocol
-- Codex launch command config (`codex.command`, default `codex app-server`)
+- Exact managed Codex/systemd launch plus compatibility `codex.command`
 - Strict prompt rendering with `issue` and `attempt` variables
 - Exponential retry queue with continuation retries after normal exit
 - Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
@@ -2315,6 +2934,8 @@ Use the same validation profiles as Section 17:
 - Workspace cleanup for terminal issues (startup sweep + normal-poll and active transitions)
 - Structured logs with `issue_id`, `issue_identifier`, and `session_id`
 - Operator-visible observability (structured logs; OPTIONAL snapshot/status surface)
+- Managed descendant quiescence before runtime-lease release/expiry, with retained authority on
+  observation failure
 
 ### 18.2 RECOMMENDED Extensions (Not REQUIRED for Conformance)
 
@@ -2322,7 +2943,11 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - Provider-native agent tools, when shipped, execute through the app-server session using
   host-side configured adapter auth without passing tracker secrets to the child.
-- TODO: Persist retry queue and session metadata across process restarts.
+- Managed Git-worktree driver, when shipped, implements the recorded-allocation, recovery,
+  independent-verification, fresh-generation, and guarded-cleanup contract in Section 9.3.
+- Pnpm preparation, when shipped, uses an offline frozen script/hook-disabled install inside a
+  fail-closed network-less sandbox with an attempt-private cache, read-only operator seed, pinned
+  dependency-policy digest, and recorded four-way outcomes.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
 - TODO: Extract common semantic helper tools only after multiple adapters demonstrate real

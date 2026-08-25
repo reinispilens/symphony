@@ -7,7 +7,10 @@ import type {
   AgentRunResult,
 } from "../../src/agent/runner.js";
 import type { Issue } from "../../src/domain/issue.js";
+import { SymphonyError } from "../../src/errors.js";
 import type { Logger } from "../../src/observability/logger.js";
+import type { RepositoryCleanupAuthority } from "../../src/repository/driver.js";
+import { SqliteSymphonyStateStore } from "../../src/state/sqlite-store.js";
 import type {
   OrchestratorClock,
   TimerHandle,
@@ -23,7 +26,7 @@ import type {
 } from "../../src/tracker/adapter.js";
 import type { ServiceConfig } from "../../src/workflow/config.js";
 import type { WorkflowSnapshot } from "../../src/workflow/store.js";
-import { issue } from "../support/factories.js";
+import { issue, withTempDirectory } from "../support/factories.js";
 
 const START_MS = Date.parse("2026-08-23T10:00:00Z");
 
@@ -111,14 +114,35 @@ interface PendingRun {
 
 class FakeAgentRunner implements AgentExecutionPort {
   readonly cleanups: Array<{ issue: Issue; workflow: WorkflowSnapshot }> = [];
+  readonly cleanupErrors: Error[] = [];
+  readonly quiescenceChecks: Array<{
+    workflow: WorkflowSnapshot;
+    authority: RepositoryCleanupAuthority | undefined;
+  }> = [];
+  readonly quiescenceErrors: Error[] = [];
   readonly runs: PendingRun[] = [];
   autoRejectOnAbort = true;
+  quiescenceFailure: Error | null = null;
+  onQuiesce: (() => void) | null = null;
 
   async cleanupWorkspace(
     cleanedIssue: Issue,
     workflow: WorkflowSnapshot,
   ): Promise<void> {
     this.cleanups.push({ issue: cleanedIssue, workflow });
+    const error = this.cleanupErrors.shift();
+    if (error !== undefined) throw error;
+  }
+
+  async quiesceRuntime(
+    workflow: WorkflowSnapshot,
+    authority?: RepositoryCleanupAuthority,
+  ): Promise<void> {
+    this.quiescenceChecks.push({ workflow, authority });
+    this.onQuiesce?.();
+    if (this.quiescenceFailure !== null) throw this.quiescenceFailure;
+    const error = this.quiescenceErrors.shift();
+    if (error !== undefined) throw error;
   }
 
   run(options: AgentRunOptions): Promise<AgentRunResult> {
@@ -218,6 +242,7 @@ function serviceConfig(
   } = {},
 ): ServiceConfig {
   return {
+    deployment: null,
     tracker: {
       kind: "test",
       provider: {},
@@ -232,6 +257,13 @@ function serviceConfig(
       requiredLabels: ["ready"],
       excludedLabels: ["blocked"],
       secretEnvironmentNames: [],
+    },
+    repository: null,
+    preparation: {
+      driver: "none",
+      frozenLockfile: true,
+      lifecycleScripts: false,
+      timeoutMs: 300_000,
     },
     polling: { intervalMs: 1_000_000 },
     workspace: { provider: "directory", root: "/workspaces" },
@@ -298,22 +330,150 @@ async function settle(orchestrator: Orchestrator): Promise<void> {
 
 function createHarness(options: {
   readonly config?: ServiceConfig;
+  readonly stateStore?: SqliteSymphonyStateStore;
   readonly tracker: FakeTracker;
 }) {
   const clock = new FakeClock();
   const agentRunner = new FakeAgentRunner();
+  const stateStore =
+    options.stateStore ?? SqliteSymphonyStateStore.openInMemory();
   const workflowSource = new FakeWorkflowSource(workflow(options.config));
   const orchestrator = new Orchestrator({
     agentRunner,
     clock,
     logger: logger(),
+    stateStore,
     trackerFactory: () => options.tracker,
     workflowStore: workflowSource,
   });
-  return { agentRunner, clock, orchestrator, workflowSource };
+  return { agentRunner, clock, orchestrator, stateStore, workflowSource };
+}
+
+function seedExpiredRuntimeLease(
+  stateStore: SqliteSymphonyStateStore,
+  active: Issue,
+) {
+  const repositoryIdentity = "workflow:/repo/WORKFLOW.md";
+  const session = stateStore.getOrCreateTrackerSession({
+    trackerKind: "test",
+    repositoryIdentity,
+    issueId: active.id,
+    issueIdentifier: active.identifier,
+    issueUrl: active.url,
+    intent: active.title,
+    controllerId: `tracker:test:${repositoryIdentity}`,
+    doctrine: null,
+    configuration: null,
+    now: new Date(START_MS - 3_000).toISOString(),
+  });
+  const started = stateStore.startAttempt({
+    sessionId: session.id,
+    controllerGeneration: session.controller.generation,
+    holderId: "departed-daemon",
+    trackerAttempt: null,
+    freshAttemptGeneration: null,
+    now: new Date(START_MS - 2_000).toISOString(),
+    leaseExpiresAt: new Date(START_MS - 1_000).toISOString(),
+  });
+  return { session, started };
 }
 
 describe("Orchestrator", () => {
+  it("proves an expired runtime quiescent before releasing its lease and redispatching", async () => {
+    const active = task("EXPIRED-QUIESCENT");
+    const stateStore = SqliteSymphonyStateStore.openInMemory();
+    const { session, started } = seedExpiredRuntimeLease(stateStore, active);
+    const harness = createHarness({
+      stateStore,
+      tracker: new FakeTracker({ stateResponses: [[], [active]] }),
+    });
+    harness.agentRunner.onQuiesce = () => {
+      expect(
+        stateStore.getSession(session.id)?.attempts[0]?.runtimeLease.status,
+      ).toBe("active");
+    };
+
+    await harness.orchestrator.start();
+    await settle(harness.orchestrator);
+
+    expect(harness.agentRunner.quiescenceChecks).toEqual([
+      {
+        workflow: harness.workflowSource.current,
+        authority: {
+          workSessionId: session.id,
+          controllerGeneration: session.controller.generation,
+        },
+      },
+    ]);
+    expect(stateStore.getSession(session.id)?.attempts).toMatchObject([
+      {
+        id: started.attemptId,
+        status: "interrupted",
+        runtimeLease: { status: "expired" },
+      },
+      { status: "running", runtimeLease: { status: "active" } },
+    ]);
+    expect(harness.agentRunner.runs).toHaveLength(1);
+    await harness.orchestrator.stop();
+  });
+
+  it("retains an expired lease and blocks dispatch when runtime quiescence is unproven", async () => {
+    const active = task("EXPIRED-STILL-LIVE");
+    const stateStore = SqliteSymphonyStateStore.openInMemory();
+    const { session, started } = seedExpiredRuntimeLease(stateStore, active);
+    const harness = createHarness({
+      stateStore,
+      tracker: new FakeTracker({ stateResponses: [[], [active]] }),
+    });
+    harness.agentRunner.quiescenceFailure = new SymphonyError(
+      "runtime_quiescence_refused",
+      "descendant still alive",
+    );
+
+    await harness.orchestrator.start();
+    await settle(harness.orchestrator);
+
+    expect(harness.agentRunner.quiescenceChecks).toHaveLength(2);
+    expect(harness.agentRunner.runs).toHaveLength(0);
+    expect(stateStore.getSession(session.id)?.attempts).toMatchObject([
+      {
+        id: started.attemptId,
+        status: "running",
+        runtimeLease: { status: "active" },
+      },
+    ]);
+    await harness.orchestrator.stop();
+  });
+
+  it("retains the active lease when worker finalization cannot prove quiescence", async () => {
+    const active = task("FINALIZATION-STILL-LIVE");
+    const harness = createHarness({
+      tracker: new FakeTracker({ stateResponses: [[], [active]] }),
+    });
+    await harness.orchestrator.start();
+    await settle(harness.orchestrator);
+    const session = harness.stateStore.getTrackerSession(
+      "test",
+      "workflow:/repo/WORKFLOW.md",
+      active.id,
+    );
+
+    harness.agentRunner.reject(
+      0,
+      new SymphonyError("runtime_quiescence_refused", "descendant still alive"),
+    );
+    await settle(harness.orchestrator);
+
+    expect(harness.orchestrator.snapshot().counts).toEqual({
+      running: 0,
+      retrying: 0,
+    });
+    expect(harness.stateStore.getSession(session!.id)?.attempts).toMatchObject([
+      { status: "running", runtimeLease: { status: "active" } },
+    ]);
+    await harness.orchestrator.stop();
+  });
+
   it("hands a refused fresh attempt to humans without launching a retry", async () => {
     const rework = task("REWORK-REFUSED", { state: "Rework" });
     const refuse = vi.fn(async () => undefined);
@@ -375,10 +535,12 @@ describe("Orchestrator", () => {
       kind: "fresh_handoff",
       error: "old workspace retained",
     });
+    expect(harness.stateStore.listPendingEffects()).toHaveLength(1);
 
     harness.clock.advance(10_000);
     await settle(harness.orchestrator);
     expect(refuse).toHaveBeenCalledTimes(2);
+    expect(harness.stateStore.listPendingEffects()).toHaveLength(0);
     expect(harness.agentRunner.runs).toHaveLength(1);
     expect(harness.orchestrator.snapshot().counts).toEqual({
       running: 0,
@@ -554,8 +716,47 @@ describe("Orchestrator", () => {
     await harness.orchestrator.start();
     await settle(harness.orchestrator);
 
+    const session = harness.stateStore.getTrackerSession(
+      "test",
+      "workflow:/repo/WORKFLOW.md",
+      active.id,
+    );
+    expect(session).toMatchObject({
+      origin: { kind: "tracker", issueId: active.id },
+      attempts: [{ status: "running" }],
+    });
+    await harness.agentRunner.runs[0]?.options.onWorkspace?.({
+      createdNow: true,
+      path: "/workspaces/CONTINUE",
+      workspaceKey: "CONTINUE",
+    });
+    await harness.agentRunner.emit(0, {
+      event: "session_started",
+      timestamp: new Date(START_MS).toISOString(),
+      codex_app_server_pid: 4321,
+      session_id: "codex-session-1",
+      thread_id: "thread-1",
+      turn_id: "turn-1",
+    });
+
     harness.agentRunner.resolve(0, active);
     await settle(harness.orchestrator);
+    expect(harness.stateStore.getSession(session!.id)).toMatchObject({
+      attempts: [
+        {
+          status: "completed",
+          workspaceLease: {
+            mode: "legacy-directory",
+            path: "/workspaces/CONTINUE",
+          },
+          runtimeCorrelation: {
+            processId: 4321,
+            sessionId: "codex-session-1",
+          },
+        },
+      ],
+      retry: { kind: "continuation", attempt: 1 },
+    });
     expect(harness.orchestrator.snapshot().retrying).toEqual([
       expect.objectContaining({
         issue_id: active.id,
@@ -572,7 +773,67 @@ describe("Orchestrator", () => {
     await settle(harness.orchestrator);
     expect(harness.agentRunner.runs[1]?.options.attempt).toBe(1);
     expect(harness.agentRunner.runs[1]?.options.issue.id).toBe(active.id);
+    expect(harness.stateStore.getSession(session!.id)?.attempts).toHaveLength(
+      2,
+    );
     await harness.orchestrator.stop();
+  });
+
+  it("recovers a durable retry after daemon restart without a duplicate WorkSession", async () => {
+    await withTempDirectory(async (directory) => {
+      const active = task("RESTART-RETRY");
+      const databasePath = `${directory}/state.sqlite`;
+      const firstStore = SqliteSymphonyStateStore.open(databasePath);
+      const first = createHarness({
+        stateStore: firstStore,
+        tracker: new FakeTracker({ stateResponses: [[], [active]] }),
+      });
+      await first.orchestrator.start();
+      await settle(first.orchestrator);
+      first.agentRunner.reject(0, new Error("transient provider failure"));
+      await settle(first.orchestrator);
+      const original = firstStore.getTrackerSession(
+        "test",
+        "workflow:/repo/WORKFLOW.md",
+        active.id,
+      );
+      expect(original?.retry).toMatchObject({ kind: "failure", attempt: 1 });
+      await first.orchestrator.stop();
+      firstStore.close();
+
+      const secondStore = SqliteSymphonyStateStore.open(databasePath);
+      const second = createHarness({
+        stateStore: secondStore,
+        tracker: new FakeTracker({
+          stateResponses: [[], [active], [active]],
+        }),
+      });
+      await second.orchestrator.start();
+      await settle(second.orchestrator);
+      expect(second.agentRunner.runs).toHaveLength(0);
+      expect(second.orchestrator.snapshot().retrying).toEqual([
+        expect.objectContaining({
+          issue_id: active.id,
+          attempt: 1,
+          kind: "failure",
+        }),
+      ]);
+
+      second.clock.advance(10_000);
+      await second.orchestrator.tick();
+      await settle(second.orchestrator);
+      expect(second.agentRunner.runs).toHaveLength(1);
+      expect(second.agentRunner.runs[0]?.options.attempt).toBe(1);
+      const recovered = secondStore.getTrackerSession(
+        "test",
+        "workflow:/repo/WORKFLOW.md",
+        active.id,
+      );
+      expect(recovered?.id).toBe(original?.id);
+      expect(recovered?.attempts).toHaveLength(2);
+      await second.orchestrator.stop();
+      secondStore.close();
+    });
   });
 
   it("cleans a newly terminal workspace after its non-active continuation released the claim", async () => {
@@ -675,6 +936,37 @@ describe("Orchestrator", () => {
       running: 0,
       retrying: 0,
     });
+    await harness.orchestrator.stop();
+  });
+
+  it("keeps the WorkSession active and retries a refused terminal cleanup", async () => {
+    const active = task("TERMINAL-CLEANUP-RETRY");
+    const done = { ...active, state: "Done", dispatchable: false };
+    const tracker = new FakeTracker({
+      stateResponses: [[], [active], [done], [done]],
+      idResponses: [[done]],
+    });
+    const harness = createHarness({ tracker });
+    harness.agentRunner.cleanupErrors.push(new Error("workspace is ambiguous"));
+    await harness.orchestrator.start();
+    await settle(harness.orchestrator);
+    const session = harness.stateStore.getTrackerSession(
+      "test",
+      "workflow:/repo/WORKFLOW.md",
+      active.id,
+    );
+
+    await harness.orchestrator.tick();
+    await settle(harness.orchestrator);
+    expect(harness.agentRunner.cleanups).toHaveLength(1);
+    expect(harness.stateStore.getSession(session!.id)?.status).toBe("active");
+
+    await harness.orchestrator.tick();
+    await settle(harness.orchestrator);
+    expect(harness.agentRunner.cleanups).toHaveLength(2);
+    expect(harness.stateStore.getSession(session!.id)?.status).toBe(
+      "completed",
+    );
     await harness.orchestrator.stop();
   });
 

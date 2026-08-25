@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "id": "your-repository-production",
+  "productProfile": {
+    "repositoryIdentity": "your-owner/your-repository",
+    "sourceRoot": "/srv/repositories/your-repository",
+    "path": ".symphony/repository-profile.json",
+    "revision": "0000000000000000000000000000000000000000",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "stateRoot": "/var/lib/symphony/your-repository",
+  "workspaceRoot": "/srv/symphony-workspaces/your-repository",
+  "branchPrefix": "symphony/",
+  "gitExecutable": "/usr/bin/git",
+  "tracker": {
+    "kind": "github-projects",
+    "provider": {
+      "hostname": "github.com",
+      "owner": "your-owner",
+      "repo": "your-repository",
+      "project": 1,
+      "status_field": "Status",
+      "priority_field": "Priority",
+      "agent_status_targets": ["In Progress", "Human Review", "Done"]
+    },
+    "requiredLabels": ["driver:symphony"],
+    "excludedLabels": ["driver:direct"],
+    "activeStates": ["Todo", "In Progress", "Merging", "Rework"],
+    "terminalStates": ["Done", "Cancelled", "Duplicate"],
+    "freshAttemptStates": ["Rework"],
+    "freshAttemptFailureState": "Human Review"
+  },
+  "polling": {
+    "intervalMs": 30000
+  },
+  "preparation": {
+    "timeoutMs": 300000,
+    "nodeExecutable": "/opt/node-v22.23.2/bin/node",
+    "pnpmEntryPoint": "/opt/pnpm-11.3.0/bin/pnpm.mjs",
+    "sandboxExecutable": "/usr/bin/bwrap",
+    "dependencyPolicy": {
+      "id": "public-npm-offline-v1",
+      "mode": "offline",
+      "registry": "https://registry.npmjs.org/",
+      "seedStoreRoot": "/srv/symphony-dependency-stores/pnpm",
+      "pnpmVersion": "11.3.0"
+    }
+  },
+  "agent": {
+    "maxConcurrentAgents": 1,
+    "maxTurns": 20,
+    "maxRetryBackoffMs": 300000,
+    "maxConcurrentAgentsByState": {
+      "Rework": 1
+    }
+  },
+  "runtime": {
+    "codexExecutable": "/usr/local/bin/codex",
+    "turnTimeoutMs": 3600000,
+    "readTimeoutMs": 5000,
+    "stallTimeoutMs": 300000,
+    "containment": {
+      "provider": "systemd-user-scope",
+      "shutdownTimeoutMs": 10000,
+      "systemdRunExecutable": "/usr/bin/systemd-run",
+      "systemctlExecutable": "/usr/bin/systemctl"
+    }
+  }
+}

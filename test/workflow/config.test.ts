@@ -45,6 +45,13 @@ describe("resolveServiceConfig", () => {
         freshAttemptFailureState: null,
         secretEnvironmentNames: ["TEST_TRACKER_TOKEN"],
       },
+      repository: null,
+      preparation: {
+        driver: "none",
+        frozenLockfile: true,
+        lifecycleScripts: false,
+        timeoutMs: 300_000,
+      },
       polling: { intervalMs: 30_000 },
       workspace: {
         provider: "directory",
@@ -206,6 +213,163 @@ describe("resolveServiceConfig", () => {
         message: expect.stringContaining("workspace.provider"),
       }),
     );
+  });
+
+  it("accepts a thin managed-repository profile and rejects lifecycle scripts", () => {
+    const managed = resolve({
+      tracker: { kind: "test", provider: { hostname: "github.com" } },
+      repository: {
+        identity: "acme/widgets",
+        base_ref: "refs/remotes/origin/main",
+        branch_prefix: "symphony/",
+      },
+      workspace: { provider: "git-worktree", root: "/worktrees/widgets" },
+      preparation: {
+        driver: "pnpm",
+        frozen_lockfile: true,
+        lifecycle_scripts: false,
+        timeout_ms: 120_000,
+      },
+    });
+    expect(managed).toMatchObject({
+      repository: {
+        identity: "acme/widgets",
+        hostname: "github.com",
+        baseRef: "refs/remotes/origin/main",
+        branchPrefix: "symphony/",
+      },
+      workspace: { provider: "git-worktree", root: "/worktrees/widgets" },
+      preparation: {
+        driver: "pnpm",
+        frozenLockfile: true,
+        lifecycleScripts: false,
+        timeoutMs: 120_000,
+      },
+      hooks: {
+        afterCreate: null,
+        beforeRun: null,
+        afterRun: null,
+        beforeRemove: null,
+      },
+      codex: {
+        command: "codex app-server",
+        approvalPolicy: "never",
+        threadSandbox: "workspace-write",
+        turnSandboxPolicy: {
+          type: "workspaceWrite",
+          writableRoots: [],
+          networkAccess: false,
+          excludeSlashTmp: true,
+          excludeTmpdirEnvVar: true,
+        },
+      },
+    });
+
+    expect(() =>
+      resolve({
+        tracker: { kind: "test" },
+        repository: {
+          identity: "acme/widgets",
+          base_ref: "refs/remotes/origin/main",
+          branch_prefix: "symphony/",
+        },
+        workspace: { provider: "git-worktree" },
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        message: expect.stringContaining("tracker.provider.hostname"),
+      }),
+    );
+
+    expect(() =>
+      resolve({
+        tracker: { kind: "test" },
+        workspace: { provider: "git-worktree" },
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        message: expect.stringContaining("repository.identity"),
+      }),
+    );
+    expect(() =>
+      resolve({
+        tracker: { kind: "test" },
+        repository: {
+          identity: "acme/widgets",
+          base_ref: "refs/remotes/origin/main",
+          branch_prefix: "symphony/",
+        },
+        workspace: { provider: "git-worktree" },
+        hooks: { before_run: "pnpm install" },
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        message: expect.stringContaining("must not define lifecycle commands"),
+      }),
+    );
+    expect(() =>
+      resolve({
+        tracker: { kind: "test" },
+        preparation: { driver: "pnpm" },
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        message: expect.stringContaining(
+          "requires workspace.provider 'git-worktree'",
+        ),
+      }),
+    );
+    for (const preparation of [
+      { driver: "shell" },
+      { driver: "pnpm", frozen_lockfile: false },
+      { driver: "pnpm", lifecycle_scripts: true },
+    ]) {
+      expect(() =>
+        resolve({ tracker: { kind: "test" }, preparation }),
+      ).toThrowError(
+        expect.objectContaining({ code: "config_validation_error" }),
+      );
+    }
+
+    const managedBase = {
+      tracker: { kind: "test", provider: { hostname: "github.com" } },
+      repository: {
+        identity: "acme/widgets",
+        base_ref: "refs/remotes/origin/main",
+        branch_prefix: "symphony/",
+      },
+      workspace: { provider: "git-worktree" },
+    } satisfies JsonObject;
+    for (const codex of [
+      { command: "candidate-wrapper app-server" },
+      { approval_policy: "on-request" },
+      { thread_sandbox: "danger-full-access" },
+      { turn_sandbox_policy: null },
+      { turn_sandbox_policy: { type: "workspaceWrite" } },
+    ]) {
+      expect(() => resolve({ ...managedBase, codex })).toThrowError(
+        expect.objectContaining({ code: "config_validation_error" }),
+      );
+    }
+  });
+
+  it("keeps Codex protocol overrides available only to compatibility workspace modes", () => {
+    const config = resolve({
+      tracker: { kind: "test" },
+      codex: {
+        command: "custom app-server",
+        approval_policy: "on-request",
+        thread_sandbox: "danger-full-access",
+        turn_sandbox_policy: { type: "dangerFullAccess" },
+      },
+    });
+
+    expect(config.codex).toMatchObject({
+      command: "custom app-server",
+      approvalPolicy: "on-request",
+      threadSandbox: "danger-full-access",
+      turnSandboxPolicy: { type: "dangerFullAccess" },
+    });
   });
 
   it("normalizes valid per-state limits and ignores invalid entries", () => {

@@ -6,6 +6,7 @@ import type { WorkflowSnapshot } from "../../src/workflow/store.js";
 
 function snapshot(hash = "hash-1", kind = "github-projects"): WorkflowSnapshot {
   const config: ServiceConfig = {
+    deployment: null,
     tracker: {
       kind,
       provider: {
@@ -25,6 +26,13 @@ function snapshot(hash = "hash-1", kind = "github-projects"): WorkflowSnapshot {
       requiredLabels: [],
       excludedLabels: [],
       secretEnvironmentNames: [],
+    },
+    repository: null,
+    preparation: {
+      driver: "none",
+      frozenLockfile: true,
+      lifecycleScripts: false,
+      timeoutMs: 300_000,
     },
     polling: { intervalMs: 30_000 },
     workspace: { provider: "directory", root: "/tmp/workspaces" },

@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "repositoryIdentity": "your-owner/your-repository",
+  "baseRef": "refs/remotes/origin/main",
+  "authoringContext": {
+    "promptPath": ".symphony/prompt.md",
+    "paths": ["AGENTS.md"]
+  },
+  "preparationClass": "pnpm"
+}
