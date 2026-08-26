@@ -2,14 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import type { WorkSessionDocument } from "../../src/state/model.js";
 import { parseWorkSessionDocument } from "../../src/state/validation.js";
+import { acceptedGovernanceFixture } from "../support/factories.js";
 
 const CREATED = "2026-08-25T10:00:00.000Z";
-const DOCTRINE = {
-  repositoryIdentity: "reinispilens/.github",
-  path: "agent-system/golden-principles.md",
-  revision: "f".repeat(40),
-  digest: "sha256:doctrine",
-} as const;
+const GOVERNANCE = acceptedGovernanceFixture();
+const DOCTRINE = GOVERNANCE.doctrine;
 
 function completeDocument(): WorkSessionDocument {
   return {
@@ -41,7 +38,10 @@ function completeDocument(): WorkSessionDocument {
         id: "widgets-production",
         digest: "sha256:binding",
       },
+      governanceManifest: GOVERNANCE.governanceManifest,
+      trackerPolicy: GOVERNANCE.trackerPolicy,
       deliveryGrant: null,
+      proofAuthority: null,
     },
     controller: {
       kind: "human",

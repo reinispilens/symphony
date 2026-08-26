@@ -4,35 +4,43 @@
 > This runbook documents the managed-workspace implementation plus the existing
 > hook-based compatibility route. New repositories use the Symphony-owned
 > [`repository-driver boundary`](repository-driver-boundary.md); they do not implement Symphony
-> lifecycle features locally. WCP protected proof and Symphony's durable delivery substrate exist;
-> accepted governance composition and the Dyslexify deployment pilot remain separate gates.
+> lifecycle features locally. Accepted-governance composition, lane-aware orchestration, WCP proof
+> correlation, and durable delivery exist in Symphony. The final accepted-publication repin and the
+> Dyslexify deployment journey remain separate estate gates.
 
 ## Deployment map
 
 ```text
-product A @ accepted Git SHA       operator-owned binding A
-profile + prompt/context           tracker + roots + runtime
-                └──────────┬──────────┘
-                           ▼
-                symphony@repository-a.service ──▶ Project A
-                           │
-                           ├── managed Git worktrees
-                           ├── sandboxed preparation
-                           └── systemd user scopes for agent descendants
-                           ▼
-                    state-root/state.sqlite
-                 WorkSessions · leases · sagas · outbox
+personal .github @ publication SHA
+accepted manifest ─▶ doctrine + tracker policy ─────┐
+                                                     │
+product A @ accepted Git SHA       operator binding v3 │
+profile + prompt/context           tracker + roots + runtime + WCP trust anchor
+                └───────────────┬───────────────┘
+                                  ▼
+                       accepted configuration
+                                  │
+                       symphony@repository-a.service ──▶ Project A
+                                  │
+                                  ├── managed Git worktrees
+                                  ├── sandboxed preparation
+                                  ├── systemd user scopes for agent descendants
+                                  └── durable PR/proof/delivery reconciliation
+                                  ▼
+                           state-root/state.sqlite
+                        WorkSessions · leases · sagas · outbox
 
 one service instance = one repository = one workspace root = one Project
 ```
 
 Symphony is a daemon, not a command that should be launched once per issue. A supervisor keeps one
 instance alive for each repository. For managed Git, an operator-owned binding is the deployment
-contract. It pins one product profile/context revision and supplies the Project, host roots,
-capacity, runtime, process-containment authority, and—when pnpm is selected—the exact preparation
-toolchain plus offline dependency policy. Running several repositories in one Symphony process is
-deliberately unsupported. Repository-owned `WORKFLOW.md` remains only for existing directory/harness
-compatibility deployments.
+contract. Version 3 pins one accepted `.github` publication plus one product profile/context
+revision and supplies the Project, host roots, capacity, runtime, delivery credentials,
+process-containment authority, one exact WCP reusable-workflow trust anchor, and—when pnpm is
+selected—the exact preparation toolchain plus offline dependency policy. Running several
+repositories in one Symphony process is deliberately unsupported. Repository-owned `WORKFLOW.md`
+remains only for existing directory/harness compatibility deployments.
 
 ## Prepare a host
 
@@ -47,10 +55,11 @@ pnpm check
 pnpm build
 ```
 
-Authenticate `gh` as the same operating-system user that will run the service. Use a protected
-environment file readable only by root and the service identity when using token authentication. The credential needs read
-access to the exact repository and Project plus write access only if provider-native workpad or
-status tools are enabled.
+Authenticate `gh` as the same operating-system user that will run the service. For the built-in
+GitHub delivery provider, place `GH_TOKEN` in a protected environment file readable only by the
+service identity. The combined authority needs read access to the exact repository, Project,
+workflow run, and artifact records; status/workpad, push, pull-request, or merge rights are needed
+only for operations allowed by the pinned product grant and tracker lane.
 
 Treat the workflow and every compatibility hook as privileged service code. Hooks intentionally run
 on the parent side and inherit its environment; only the Codex child receives the scrubbed
@@ -59,27 +68,37 @@ A person who can change a deployed hook can therefore act with the daemon's file
 authority. Known tracker-secret values are redacted if `gh` or a hook echoes them into a captured
 error, but that safeguard does not make untrusted hooks safe.
 
-For a managed deployment, commit the thin product profile and prompt/context, then create the
-separate binding from [`../examples/managed/deployment-binding.json`](../examples/managed/deployment-binding.json).
-Replace its placeholder revision and digest with the exact accepted profile commit/blob digest.
-Confirm that the source checkout's observed origin matches the tracker plus profile identity, the
-profile's full base ref exists locally, and source/state/workspace roots are pairwise disjoint real
-paths. The binding itself must be outside all three roots. For `preparationClass: none`, set the
-binding's `preparation` value to `null`; an unused pnpm authority is refused. For
-`preparationClass: pnpm`, point
+For a managed deployment, commit the thin product profile and prompt/context. Prepare a trusted
+checkout of the personal/organization `.github` repository outside product, state, and workspace
+roots; fetch both the manifest publication commit and the manifest's accepted artifact revision.
+Create the separate version-3 binding from
+[`../examples/managed/deployment-binding.json`](../examples/managed/deployment-binding.json). Replace
+its placeholders with the exact profile and manifest revisions plus the SHA-256 digests of their Git
+blob bytes. The product's delivery grant must name the accepted tracker-policy reference exactly;
+the product cannot select a different policy or a mutable branch. Set
+`deliveryProvider.proofAuthority.requiredCheck` to one check in that grant, then pin the exact
+`pull_request_target` caller path and the Workspace Control Plane reusable workflow by repository,
+path, and full commit. This is operator transport authority: do not copy WCP implementation into
+the product repository.
+
+Confirm that both checkouts' observed `origin` identities match their declarations, the product
+profile's full base ref exists locally, and governance/source/state/workspace roots are pairwise
+disjoint real paths. The binding itself must be outside all four roots. For
+`preparationClass: none`, set the binding's `preparation` value to `null`; an unused pnpm authority
+is refused. For `preparationClass: pnpm`, point
 `preparation.dependencyPolicy.seedStoreRoot` at the real parent of pnpm's versioned store directory:
 if `pnpm store path` prints `/srv/pnpm/store/v11`, the configured root is `/srv/pnpm/store`. The seed
-root must be disjoint from product, state, and workspace roots and must already contain
+root must be disjoint from governance, product, state, and workspace roots and must already contain
 `v11/index.db` plus `v11/files` for every admitted dependency. Populate or refresh this trusted seed
 as a separate operator action before starting Symphony; candidate preparation never fills it.
 
-The binding always names exact regular paths for Git, Codex, `systemd-run`, and `systemctl`; a pnpm
-binding additionally names preparation Node, the pnpm entry point, and Bubblewrap. Executable paths
-cannot reside under product, state, or workspace roots, and preparation/seed paths may not use
-symlink components. The service user must
-have a working systemd user manager (`systemctl --user show --property=Version`) and unprivileged
-Bubblewrap namespaces. Symphony verifies the pinned pnpm version during startup. Managed mode has
-no unsandboxed or shared-network fallback. Each live authoring runtime receives one private temp
+The binding always names exact regular paths for Git, Codex, the delivery provider, `systemd-run`,
+and `systemctl`; a pnpm binding additionally names preparation Node, the pnpm entry point, and
+Bubblewrap. Executable paths cannot reside under governance, product, state, or workspace roots,
+and preparation/seed paths may not use symlink components. The service user must have a working
+systemd user manager (`systemctl --user show --property=Version`) and unprivileged Bubblewrap
+namespaces. Symphony verifies the pinned pnpm version during startup. Managed mode has no
+unsandboxed or shared-network fallback. Each live authoring runtime receives one private temp
 directory below `<stateRoot>/agent-runtime/` and one deterministic user scope. App-server exit does
 not release authority: Symphony signals the complete cgroup, proves it empty, removes private
 runtime state, and only then releases the lease.
@@ -98,24 +117,45 @@ runtime downloads, loopback/private/metadata access, and input drift are refusal
 is therefore `setup_refused` or `failed` evidence that the operator seed is incomplete; it is never
 permission to retry with host networking.
 
-Managed startup validates origin/base/root/executable facts before SQLite or workspace effects.
-The binding, accepted profile/context, and host topology are pinned for the daemon lifetime; there
-is no live reload. Stop cleanly, validate the new binding and state-root intent, then restart. Do
-not work around a refusal by moving the database or editing candidate copies of the profile.
+Managed startup validates governance ancestry/blobs, product origin/base, roots, and executables
+before SQLite or workspace effects. The binding, resolved publication, accepted profile/context,
+and host topology are pinned for the daemon lifetime; there is no live reload. A repin affects new
+WorkSessions only: existing sessions retain the complete policy value stored at creation. Stop
+cleanly, validate the new binding and state-root intent, then restart. Do not work around a refusal
+by moving the database or editing candidate copies of the profile or governance files.
 
-For a version-2 delivery profile, install the operator-owned delivery-provider executable outside
-the product, state, and workspace roots. Name only the credential environment variables it needs in
-the binding; Symphony refuses missing names, scrubs them from candidate execution, and sends the
-provider a credential-free JSON request on stdin. The provider must return one bounded protocol-v1
-observation on stdout. Treat a timeout, non-zero exit, truncated response, or invalid JSON as an
-ambiguous remote mutation: inspect exact provider truth before retrying. Never give the coding agent
-the provider credential as a workaround.
+Version-3 delivery can use the checked-in
+`bin/symphony-github-delivery.mjs` wrapper installed with Symphony. Keep it outside governance,
+product, state, and workspace roots and preserve its executable bit. Name only the credential
+environment variables it needs in the binding; Symphony refuses missing names, scrubs them from
+candidate execution, and sends the provider a credential-free JSON request on stdin. The provider
+returns one bounded protocol-v1 observation on stdout. It admits protected proof only from the WCP
+plan/result artifacts for the exact repository, run, attempt, immutable head, plan digest, and check
+run. It first proves from GitHub's own run metadata that GitHub Actions executed the configured
+`pull_request_target` caller and exact pinned WCP reusable workflow revision. A same-named green
+check, self-consistent fake artifacts, or a run through another reusable workflow is not delivery
+evidence.
+Treat a timeout, non-zero exit, truncated response, or invalid JSON as an ambiguous remote mutation:
+inspect exact provider truth before retrying. Never give the coding agent the provider credential as
+a workaround.
+
+Version-1 and version-2 bindings remain readable for migration and historical inspection, but they
+have no accepted-governance snapshot. Symphony therefore refuses to start a new managed Attempt
+from them; upgrade the external binding rather than copying policy into the product repository.
 
 Materialization and delivery are resumable WorkSession operations, not repository hooks. Do not
 run `git add`, `git commit`, push, PR, merge, or branch cleanup from a product-owned lifecycle script
 for a managed deployment. If Symphony refuses unsupported repository state (filters, submodules,
 nested repositories, active `info/exclude`, oversized input, or concurrent mutation), retain the
 workspace and repair or explicitly redesign that boundary; do not broaden the inclusion policy.
+
+The accepted tracker policy separates lane activity from authoring. `Todo`/`In Progress` may launch
+Codex when the issue has exactly the Symphony driver; `Human Review` may materialize, push, open a
+PR, and observe proof without an agent slot; `Merging` may additionally merge only for a
+`full-in-scope` product grant. `owner-gated` never causes Symphony to merge. Moving a session to
+`Rework` first closes its exact unmerged PR, releases its exact remote branch, and performs guarded
+local cleanup before a fresh Attempt is admitted. A completed delivery moves to `Done` only through
+the typed tracker transition after remote release and local cleanup are recorded.
 
 For an existing hook-based compatibility deployment, validate every configured hook manually from
 an empty disposable directory before starting a daemon. In particular, a harness `before_remove`
@@ -250,6 +290,9 @@ worker/retry/cleanup outcomes. Investigate these signals first:
 | `runtime_lease outcome=retained reason=quiescence_unproven`       | descendant scope could not be proven empty; dispatch stops  |
 | `attempt outcome=retained reason=quiescence_unproven`             | worker ended but its lease remains authoritative            |
 | `preparation outcome=succeeded`                                   | frozen sandboxed dependency preparation completed           |
+| `delivery outcome=awaiting_checks`                                | exact PR exists; protected artifact verdict is not ready    |
+| `delivery outcome=awaiting_owner`                                 | owner-gated PR is ready; Symphony will observe, not merge   |
+| `delivery outcome=completed`                                      | merge/release/guarded cleanup and Done effect were recorded |
 | `managed_workspace outcome=removed`                               | lease and independent Git checks authorized cleanup         |
 | `workspace_cleanup outcome=completed` with `reason=poll_terminal` | normal poll reconciled a newly terminal released workspace  |
 | `workspace_cleanup outcome=failed`                                | repository teardown needs operator attention                |
@@ -262,20 +305,23 @@ rows, tokens, runtime, and rate limits without participating in scheduling decis
 
 ## Recovery playbook
 
-On each successful normal poll, Symphony asks for active and terminal items in one state-list read.
-It dispatches only active items and sends newly observed unclaimed terminal items through guarded
-workspace cleanup. This includes a card that first moved to inactive Human Review, released its
-worker claim, and only later became Done, Cancelled, or Duplicate. A daemon restart is not required
-for that lifecycle.
+On each successful normal poll, Symphony asks for every lane that the pinned policy may reconcile.
+It dispatches only authoring lanes, resumes delivery-only lanes without an agent slot, and sends
+newly observed unclaimed terminal items through guarded workspace cleanup. This includes a card
+that moved to inactive Human Review, released its worker claim, and later received an external
+merge or became Done, Cancelled, or Duplicate. A daemon restart is not required for that lifecycle.
 
-On managed restart, Symphony resolves the exact binding/profile/context and opens
-`<stateRoot>/state.sqlite`. An expired clock is only a reconciliation candidate: Symphony first
+On managed restart, Symphony resolves the exact binding/governance/profile/context and opens
+`<stateRoot>/state.sqlite`. Each existing WorkSession continues with its stored tracker-policy
+snapshot even if the restarted daemon points at a newer accepted publication. An expired clock is
+only a reconciliation candidate: Symphony first
 contacts the configured user manager, terminates the deterministic WorkSession/controller scope,
 and proves its cgroup empty. Only then does the fenced transaction mark the old Attempt interrupted
 and permit dispatch. If the user manager or observation fails, the lease stays active and no
-replacement starts. Durable retry due times and pending effects remain discoverable; terminal items
-are fetched before the first active poll. Managed worktrees are reused only when their durable lease
-and independent Git/filesystem identity match; uncertainty is retained, never adopted or deleted.
+replacement starts. Durable retry due times, pending delivery sagas, and pending effects remain
+discoverable; tracker truth is refreshed before the first mutation. Managed worktrees are reused
+only when their durable lease and independent Git/filesystem identity match; uncertainty is
+retained, never adopted or deleted.
 
 If a card is stuck, first inspect its current Project status, WorkSession/Attempt IDs in the journal,
 and the managed workspace's Git registration. Do not delete a workspace or branch by hand merely to
@@ -285,8 +331,10 @@ worktree record, database lane, port allocation, or receipt that only `before_re
 Repair the owning fact or compatibility teardown, then restart gracefully so the same guarded
 driver re-evaluates it.
 
-For a card in a configured fresh-attempt lane such as Rework, inspect
-`fresh_attempt_handoff`, the WorkSession's managed lease phase, branch, and generation together.
+For a card in the pinned fresh-attempt lane such as Rework, first inspect the delivery phase and its
+close/release/cleanup effects, then inspect `fresh_attempt_handoff`, the WorkSession's managed lease
+phase, branch, and generation together. A fresh workspace is not legal until prior delivery
+abandonment is complete.
 `allocating`/`provisioned` means restart reconciliation must finish or refuse the recorded effect;
 `ready` means the same generation may be reused without deleting its workpad again; `superseded`
 means ownership was atomically transferred to a later Attempt and is not another cleanup target.
@@ -337,15 +385,15 @@ from worktree directories.
 
 ## Production gate for the first target
 
-The state, managed repository, and preparation foundations have deterministic local evidence, but
-the first target is Dyslexify and remains blocked on four estate-level facts:
+The governance, state, managed repository, preparation, and delivery implementation now has
+deterministic local evidence. WCP proof v2 and its capacity-one execution boundary exist externally.
+The first target is Dyslexify and remains gated by two integration facts:
 
-1. Workspace Control Plane protected proof v2 has passed its hostile tests and one capacity-one
-   disposable-runner canary.
-2. Symphony has durable delivery correlation for one immutable PR head and required proof result.
-3. The accepted `.github` doctrine reference can be pinned into every new WorkSession.
-4. Dyslexify supplies only its thin trusted profile and product-owned proof contract; its copied
-   Symphony lifecycle is removed only after the complete replacement journey succeeds.
+1. Spec 001 lands the final golden-principles/tracker-policy wording and republishes one accepted
+   manifest whose exact references can be pinned by the deployment binding.
+2. A disposable Dyslexify item proves the composed journey using only its thin product profile and
+   product-owned proof contract. Its existing harness is not modified during this pilot; legacy
+   lifecycle retirement occurs only after replacement evidence is complete.
 
 Do not compensate for these prerequisites with hidden paths, legacy config aliases, copied
 repository harnesses, candidate-controlled proof, or unproven recursive deletion. Resolve product,

@@ -269,8 +269,9 @@ Fields (logical):
 - `doctrine_snapshot` (portable repository/path/revision/digest, or null only during the documented
   doctrine-migration compatibility window)
 - `accepted_configuration` (the immutable product-profile reference, resolved authoring-context
-  manifest and entries, deployment-binding identity/digest, and optional version-1 compatibility
-  or exact product-owner delivery grant)
+  manifest and entries, deployment-binding identity/digest, accepted-governance manifest reference,
+  complete typed tracker-policy snapshot with its source reference, and optional version-1 product
+  compatibility or exact product-owner delivery grant plus operator protected-proof authority)
 - `controller_assignment` (kind, controller ID, monotonically increasing fencing generation)
 - ordered decisions/steering/exceptions, with accepted doctrine and `GP-xx` identity on exceptions
 - zero or one revisioned plan with acceptance criteria
@@ -440,11 +441,14 @@ Managed Git worktrees MUST start from an operator-owned deployment binding suppl
 `--binding`. A positional or default repository-owned `WORKFLOW.md` MUST NOT authorize
 `workspace.provider: git-worktree`.
 
-Managed configuration has two independently validated documents:
+Managed configuration composes three independently validated authorities:
 
 1. A product-owned repository profile, read from the exact Git commit selected by the binding.
 2. An operator-owned deployment binding stored outside product source, Symphony state, and managed
    workspace roots.
+3. An accepted governance publication in an owner or organization `.github` repository, selected by
+   the binding at one exact manifest commit and digest. The manifest identifies one accepted
+   doctrine blob and one accepted tracker-policy blob at an exact ancestor commit and digest.
 
 The version-1 compatibility repository profile is a strict JSON object with:
 
@@ -484,29 +488,80 @@ non-symlink file outside product, state, and workspace roots. Every named secret
 scrubbed from the coding-agent child, and is passed only to the separately spawned provider; no
 credential value enters a WorkSession or provider request.
 
+Version 3 adds one required `governance` authority, replaces copied global tracker policy with a
+thin tracker binding, and requires each non-null delivery provider to carry a `proofAuthority`.
+`governance` contains the `.github` repository identity, an absolute trusted checkout root, and a
+manifest path/full commit/digest. The thin tracker contains only `kind` plus provider-owned routing
+coordinates. Required/excluded driver labels, active/terminal/fresh-Attempt states, and the
+fresh-Attempt failure state MUST be derived from the accepted tracker-policy blob; they MUST NOT be
+repeated in version 3.
+
+Provider-native candidate status tools MUST follow the same rule. In a managed WorkSession their
+targets are exactly the non-terminal lanes whose pinned `writers` include `agent`; a provider-local
+target list MUST NOT widen or replace that authority. Terminal lifecycle transitions such as
+delivery-complete → `Done` remain available only through the typed tracker control.
+
+The proof authority is operator-owned transport authority, not product proof meaning. It identifies
+one check already named by the accepted product delivery grant, the exact
+`pull_request_target` caller workflow path, and an exact reusable control workflow by
+repository/path/full commit. It MUST be copied into the WorkSession accepted configuration. A
+historical version-2 provider has null proof authority and cannot be used to admit protected proof.
+
+The accepted-governance manifest is a strict portable JSON document containing its schema version,
+`.github` repository identity, `acceptedRevision`, and distinct doctrine/tracker-policy artifact
+paths and digests. The tracker policy is also strict and contains one stable policy ID, exactly the
+`direct` and `symphony` driver selectors, unique lane records, the `owner-gated` and `full-in-scope`
+delivery profiles, and supported continuation/failure/Rework semantics plus an explicit
+fresh-Attempt failure lane. Every lane declares writers, active/terminal/authoring/fresh-Attempt
+bits, and every delivery-operation bit. Invalid combinations such as inactive authoring, terminal
+execution, fresh Attempt without authoring, merge without proof observation, owner-gated merge, or
+an agent-selectable Merging lane MUST be refused.
+
+Versions 1 and 2 remain parseable for historical inspection and controlled migration. Because they
+do not select accepted governance, a managed WorkSession created from either version MUST NOT start
+a new Attempt after the governance gate is installed. Historical null governance values remain
+readable and MUST NOT be silently filled from current deployment state.
+
 Resolution MUST:
 
-1. Prove the binding is a regular non-symlink file outside product/state/workspace roots.
-2. Prove the source root is the exact top-level Git worktree and is disjoint from state/workspace
-   roots.
-3. Read the profile blob and every named context blob from the binding's exact accepted commit,
-   never from mutable working-tree files; verify the profile digest and repository identity.
-4. Prove the accepted profile revision is an ancestor of the resolved allowed base commit.
-5. Bound individual and aggregate context bytes, reject duplicate/reserved/escaping paths, and
+1. Prove the binding is a regular non-symlink file outside
+   governance/product/state/workspace roots.
+2. Prove product and governance source roots are exact top-level Git worktrees with matching origin
+   identities, contain no symlink substitution, and are disjoint from one another plus state and
+   workspace roots.
+3. For binding version 3, read the manifest from its exact publication commit, verify its digest and
+   repository identity, and prove its accepted artifact commit is an ancestor of that publication.
+4. Read doctrine and tracker policy as exact regular Git blobs at the manifest's accepted commit;
+   enforce byte/UTF-8/schema bounds and verify both manifest-declared digests. Never consult mutable
+   working-tree copies or candidate bytes.
+5. Read the profile blob and every named context blob from the binding's exact accepted product
+   commit, never from mutable working-tree files; verify the profile digest and repository identity.
+6. Prove the accepted profile revision is an ancestor of the resolved allowed base commit.
+7. Require a version-2 product delivery grant's governing-policy reference to equal the resolved
+   accepted tracker-policy source reference exactly. Derive tracker runtime selectors/lanes/retry
+   targets from that policy.
+8. Require the operator proof authority's named check to exist in the accepted product grant and
+   validate both caller and control paths as GitHub workflow files plus the control revision as a
+   full immutable commit.
+9. Bound individual and aggregate context bytes, reject duplicate/reserved/escaping paths, and
    record a deterministic context manifest plus entry digests.
-6. Prove the Git, Codex, and systemd executables are regular non-symlink paths outside all governed roots.
-   When `pnpm` is selected, also prove the preparation executables/entry point are regular
-   non-symlink paths outside those roots, contain no symlink component, and report the exact policy
-   version. Refuse missing or unused pnpm authority instead of allowing the binding to weaken or
-   broaden the product-selected class.
-7. When `pnpm` is selected, prove the dependency seed is a real root disjoint from product source,
-   Symphony state, and managed workspaces; normalize and digest the offline dependency policy.
-8. Construct one pinned workflow snapshot and record the profile, context, binding, and delivery
-   grant identities/digests on the WorkSession before its first Attempt.
+10. Prove the Git, Codex, delivery-provider, and systemd executables are regular non-symlink paths
+   outside all governed roots. When `pnpm` is selected, also prove the preparation
+   executables/entry point are regular non-symlink paths outside those roots, contain no symlink
+   component, and report the exact policy version. Refuse missing or unused pnpm authority instead
+   of allowing the binding to weaken or broaden the product-selected class.
+11. When `pnpm` is selected, prove the dependency seed is a real root disjoint from governance,
+    product source, Symphony state, and managed workspaces; normalize and digest the offline
+    dependency policy.
+12. Construct one pinned workflow snapshot and record doctrine, governance manifest, complete typed
+    tracker policy, product profile, context, binding, delivery grant, and proof authority
+    identities/values on the WorkSession before its first Attempt.
 
-The pinned managed source MUST NOT live-reload. Changing a binding or accepted product revision
-requires a clean daemon restart. The binding may select an accepted product revision but MUST NOT
-rewrite its bytes or redefine product proof meaning.
+The pinned managed source MUST NOT live-reload. Changing a binding, accepted publication, or
+accepted product revision requires a clean daemon restart. A newer deployment publication applies
+only when creating a new WorkSession; recovery of an existing WorkSession MUST use its stored typed
+policy value. The binding may select accepted revisions but MUST NOT rewrite their bytes, publish
+doctrine, or redefine product proof meaning.
 
 ### 5.0.1 Trusted source materialization and delivery
 
@@ -529,17 +584,37 @@ Attempt ID, and managed-workspace lease token. It MUST:
 
 Remote delivery is a durable saga. Every mutation has a stable WorkSession idempotency key and
 controller generation and runs through the separately trusted provider process. The request carries
-the pinned product grant, current tracker authority, repository identity, exact branch/base/head,
-and no credentials. The saga MUST observe before mutation, re-observe after every ambiguous process
-outcome, and never repeat an applied effect whose provider truth disappeared.
+the pinned product grant, pinned operator proof authority, current tracker authority, repository
+identity, exact branch/base/head, and no credentials. The saga MUST observe before mutation,
+re-observe after every ambiguous process outcome, and never repeat an applied effect whose provider
+truth disappeared.
 
 Only the exact materialized commit may be pushed. PR identity must match its exact branch, base, and
 head. Every required check and admitted proof correlation must name that same head; an unrelated or
-stale green check is a refusal. `owner-gated` never produces a merge intent. `full-in-scope` may
-merge only when current tracker authority also permits it. After an exact merge is observed, a
-durable release intent removes only the exact remote branch, then the repository driver performs
-guarded local worktree/branch cleanup. Waiting for checks or owner action returns control to the
-daemon and MUST NOT consume an agent turn or sleep inside one.
+stale green check is a refusal. A protected WCP check is admitted only when the provider also reads
+the protected plan/result artifacts and verifies their repository, workflow run ID/attempt, source
+SHA, canonical plan digest, result kind, and check-run correlation. Before reading those artifacts,
+the provider MUST verify host-authenticated run metadata: GitHub Actions ownership, exact
+`pull_request_target` event, repository, immutable head, caller workflow path, and an exact
+referenced reusable workflow repository/path/SHA matching the WorkSession's pinned proof authority.
+The plan's control-workflow and control-source identities MUST match that host truth. A green host
+check, a self-consistent artifact pair, or a candidate-selected reusable workflow alone is not
+proof.
+
+For tracker-origin work, each operation requires the intersection of the WorkSession's pinned lane
+policy, its pinned product delivery profile, and current issue/provider facts. `owner-gated` never
+produces a merge intent. `full-in-scope` may merge only when current tracker authority also permits
+it. After an exact merge is observed, a durable release intent removes only the exact remote branch,
+then the repository driver performs guarded local worktree/branch cleanup. Only after cleanup may a
+typed, revision-aware tracker effect move the item to an agent-writable terminal lane. Waiting for
+checks or owner action returns control to the daemon and MUST NOT consume an agent turn or sleep
+inside one.
+
+If a current lane requires a fresh Attempt while an unmerged delivery exists, Symphony MUST first
+close the exact pull request, release the exact remote branch, and perform guarded local cleanup.
+Those steps use durable intent and observation like ordinary delivery. Only after abandonment is
+recorded may the next fresh workspace/Attempt be admitted; prior terminal delivery evidence remains
+append-only history.
 
 ### 5.0.2 Managed runtime policy
 
@@ -1140,15 +1215,16 @@ The effective poll interval SHOULD be updated when workflow config changes are r
 
 Tick sequence:
 
-1. Reconcile running issues.
+1. Reconcile running authoring issues and expired runtime leases.
 2. Run dispatch preflight validation.
-3. Using the last-known-good workflow, fetch issues whose states are in the union of active and
-   terminal states.
-4. Clean newly observed terminal workspaces that have no current claim.
-5. If preflight failed, skip new dispatch for this tick.
-6. Sort active issues by dispatch priority.
-7. Dispatch eligible issues while slots remain.
-8. Notify observability/status consumers of state changes.
+3. Using the last-known-good compatibility workflow or the union of current and stored managed
+   policies, fetch every lane required for authoring, delivery, or terminal reconciliation.
+4. Resume persisted and lane-enabled delivery sagas without consuming agent slots.
+5. Clean newly observed terminal workspaces that have no current claim or pending delivery.
+6. If preflight failed, skip new authoring dispatch for this tick.
+7. Sort authoring-eligible issues by dispatch priority.
+8. Dispatch eligible issues while slots remain.
+9. Notify observability/status consumers of state changes.
 
 Per-tick validation failure blocks dispatch but does not block terminal reconciliation through the
 last-known-good workflow. A tracker-fetch failure defers both terminal reconciliation and new
@@ -1167,6 +1243,15 @@ An issue is dispatch-eligible only if all are true:
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
+
+For a version-3 managed deployment, the accepted tracker policy supplies the state and driver-label
+parts of these rules. A new WorkSession uses the deployment's current policy; an existing
+WorkSession uses its stored policy even after a repin. The issue's live lane MUST be both `active`
+and `authoring`, and its labels MUST select exactly the accepted Symphony driver. An active
+delivery-only lane is reconciliation work, not dispatch eligibility, and MUST NOT reserve an agent
+slot. A lane with delivery operations may be reconciled even when its `active` bit is false. The
+adapter's `dispatchable` field remains a provider fact such as whether the issue is open; it MUST
+NOT duplicate or override accepted lane meaning.
 
 For refresh and continuation checks, `issue_routable(issue)` means only that adapter-provided
 `dispatchable` is true, all `tracker.required_labels` match, and no `tracker.excluded_labels`
@@ -1698,6 +1783,11 @@ the orchestrator.
 An adapter used with `fresh_attempt_states` additionally provides driver-only controls to delete
 its one managed workpad and to persist a blocker before assigning the configured failure state.
 These controls are not generic agent tools and are not exposed to the coding-agent child.
+
+An adapter used for managed delivery additionally provides a typed state-control capability. It
+compares provider truth with an expected state version and selects one policy-authorized target
+lane. Symphony uses it only for durable lifecycle effects such as delivery-complete → Done; it is
+not generic status CRUD and is never exposed to candidate execution.
 
 ### 11.1 REQUIRED Adapter Operations
 
@@ -2390,7 +2480,7 @@ function start_service():
 
   source = resolve_cli_source()
   if source is managed_binding:
-    workflow_snapshot = resolve_exact_profile_context_and_binding(source)
+    workflow_snapshot = resolve_exact_governance_profile_context_and_binding(source)
   else:
     workflow_snapshot = load_compatibility_workflow(source)
     if workflow_snapshot.workspace_provider is managed_git:
@@ -2402,8 +2492,9 @@ function start_service():
     fail_startup(validation)
 
   if workspace_provider is managed_git:
-    validate_source_origin_base_executables_and_roots_read_only()
-    if source, state, and workspace roots are not pairwise disjoint:
+    require_non_null_accepted_governance_for_new_attempts()
+    validate_governance_source_origin_base_executables_and_roots_read_only()
+    if governance, source, state, and workspace roots are not pairwise disjoint:
       fail_startup_without_creating_state_or_workspace_paths()
 
   state_store = open_and_validate_state_store(selected_state_database_path())
@@ -2424,6 +2515,7 @@ function start_service():
   }
 
   make_durable_retries_visible_to_polling(state_store, state)
+  make_pending_deliveries_visible_to_polling(state_store, state)
   startup_terminal_workspace_cleanup()
   make_pending_effects_visible_to_owning_reconciliation(state_store)
   start_observability_outputs()
@@ -2451,19 +2543,22 @@ on_tick(state):
   if validation is not ok:
     log_validation_error(validation)
 
-  issues = tracker.fetch_issues_by_states(active_states + terminal_states)
+  states = reconciliation_states(current_policy + active_session_policies)
+  issues = tracker.fetch_issues_by_states(states)
   if issues failed:
     log_tracker_error()
     notify_observers()
     schedule_tick(state.poll_interval_ms)
     return state
 
+  reconcile_deliveries_without_agent_slots(issues, state_store)
+
   current_terminal_ids = set()
   for issue in issues:
-    if issue.state not in terminal_states:
+    if not pinned_policy_for(issue).lane(issue.state).terminal:
       continue
     current_terminal_ids.add(issue.id)
-    if issue.id not in state.observed_terminal_issue_ids and issue.id not in state.claimed:
+    if issue.id not in state.observed_terminal_issue_ids and issue.id not in state.claimed and not delivery_pending(issue):
       cleanup_issue_workspace(issue)
   state.observed_terminal_issue_ids = current_terminal_ids
 
@@ -2476,7 +2571,7 @@ on_tick(state):
     if no_available_slots(state):
       break
 
-    if should_dispatch(issue, state):
+    if pinned_policy_for(issue).allows_authoring(issue) and should_dispatch(issue, state):
       state = dispatch_issue(issue, state, attempt=null)
 
   notify_observers()
@@ -2500,9 +2595,10 @@ function reconcile_running_issues(state):
     return state
 
   for issue in refreshed:
-    if issue.state in terminal_states:
+    policy = state_store.get_session(issue).accepted_tracker_policy
+    if policy.lane(issue.state).terminal:
       state = terminate_running_issue(state, issue.id, cleanup_workspace=true)
-    else if issue.state in active_states and issue_routable(issue):
+    else if policy.allows_authoring(issue) and issue_routable(issue):
       state.running[issue.id].issue = issue
     else:
       state = terminate_running_issue(state, issue.id, cleanup_workspace=false)
@@ -2522,8 +2618,14 @@ function dispatch_issue(issue, state, attempt):
     tracker_kind,
     repository_identity,
     issue,
-    pinned_doctrine_snapshot
+    pinned_doctrine_snapshot,
+    pinned_governance_manifest,
+    complete_typed_tracker_policy,
+    pinned_product_configuration
   )
+
+  if not work_session.accepted_tracker_policy.allows_authoring(issue):
+    return state
 
   authority = state_store.start_attempt(
     work_session.id,
@@ -2965,9 +3067,12 @@ Use the same validation profiles as Section 17:
 - Managed source selection supports an exact operator binding; compatibility path selection
   supports an explicit workflow and cwd default
 - Strict repository-profile/deployment-binding resolver plus compatibility `WORKFLOW.md` loader
+- Strict accepted-governance manifest/tracker-policy resolver with exact Git ancestry, blobs, and
+  digests; managed Attempts require a non-null pinned policy
 - Typed config layer with defaults and `$` resolution
 - Pinned managed configuration plus dynamic compatibility `WORKFLOW.md` reload/re-apply
 - Polling orchestrator whose durable mutations pass through one transactional WorkSession store
+- Lane-aware separation of authoring from delivery using stored policy plus live tracker facts
 - WorkSession aggregate with tracker/interactive origins, revisions, pinned inputs, decisions,
   session-level human attachments, attempts, runtime/workspace leases, durable retries,
   materialization/proof/delivery records, effect intents, integrity checks, migrations, and backup
@@ -2986,6 +3091,9 @@ Use the same validation profiles as Section 17:
 - Operator-visible observability (structured logs; OPTIONAL snapshot/status surface)
 - Managed descendant quiescence before runtime-lease release/expiry, with retained authority on
   observation failure
+- Restart-safe materialization and delivery with exact PR/head, host-authenticated pinned WCP
+  workflow/artifacts, product/lane grant intersection, Rework abandonment, guarded cleanup, and
+  typed terminal tracker transition
 
 ### 18.2 RECOMMENDED Extensions (Not REQUIRED for Conformance)
 

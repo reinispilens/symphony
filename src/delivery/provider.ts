@@ -2,9 +2,11 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 
 import { SymphonyError } from "../errors.js";
+import type { DeliveryOperation } from "../governance/model.js";
 import { isRecord } from "../shared/json.js";
 import type {
   DeliveryGrantSnapshot,
+  ProtectedProofAuthoritySnapshot,
   ProofCorrelation,
   RequiredCheckObservation,
 } from "../state/model.js";
@@ -25,6 +27,8 @@ export interface TrackerDeliveryAuthority {
   readonly issueId: string | null;
   readonly state: string | null;
   readonly stateVersion: string | null;
+  /** Exact lane-policy and product-grant intersection for this observation. */
+  readonly permittedOperations: readonly DeliveryOperation[];
   readonly permitsDelivery: boolean;
   readonly permitsMerge: boolean;
   readonly permitsCleanup: boolean;
@@ -53,6 +57,7 @@ interface DeliveryRequestAuthority {
   readonly controllerGeneration: number;
   readonly repositoryIdentity: string;
   readonly grant: DeliveryGrantSnapshot;
+  readonly proofAuthority: ProtectedProofAuthoritySnapshot;
   readonly tracker: TrackerDeliveryAuthority;
 }
 
@@ -81,7 +86,12 @@ export type DeliveryProviderRequest =
       readonly pullRequestId: string;
     })
   | (DeliveryRequestBase & {
+      readonly operation: "close_pull_request";
+      readonly pullRequestId: string;
+    })
+  | (DeliveryRequestBase & {
       readonly operation: "delete_remote_branch";
+      readonly sourceRoot: string;
       readonly expectedRemoteHeadSha: string;
     });
 
@@ -94,6 +104,8 @@ export interface ExternalDeliveryProviderOptions {
   readonly timeoutMs: number;
   readonly secretEnvironmentNames: readonly string[];
   readonly environment?: Readonly<Record<string, string | undefined>>;
+  readonly gitExecutable?: string;
+  readonly githubHostname?: string;
 }
 
 function nonEmptyString(value: unknown, location: string): string {
@@ -334,20 +346,25 @@ function parseObservation(value: unknown): DeliveryObservation {
 function providerEnvironment(
   source: Readonly<Record<string, string | undefined>>,
   secretNames: readonly string[],
+  trusted: Readonly<Record<string, string>>,
 ): NodeJS.ProcessEnv {
   const allowed = new Set([...SAFE_ENVIRONMENT_NAMES, ...secretNames]);
-  return Object.fromEntries(
-    Object.entries(source).filter(
-      (entry): entry is [string, string] =>
-        entry[1] !== undefined && allowed.has(entry[0]),
+  return {
+    ...Object.fromEntries(
+      Object.entries(source).filter(
+        (entry): entry is [string, string] =>
+          entry[1] !== undefined && allowed.has(entry[0]),
+      ),
     ),
-  );
+    ...trusted,
+  };
 }
 
 /** One request per trusted process; candidate code never receives this environment. */
 export class ExternalDeliveryProvider implements DeliveryProvider {
   readonly #environment: NodeJS.ProcessEnv;
   readonly #executable: string;
+  readonly #sensitiveValues: readonly string[];
   readonly #timeoutMs: number;
 
   constructor(options: ExternalDeliveryProviderOptions) {
@@ -377,11 +394,47 @@ export class ExternalDeliveryProvider implements DeliveryProvider {
         "Trusted delivery provider secret names must be unique, sorted uppercase environment-variable names",
       );
     }
+    if (
+      options.gitExecutable !== undefined &&
+      !path.isAbsolute(options.gitExecutable)
+    ) {
+      throw new SymphonyError(
+        "delivery_provider_failed",
+        "Trusted provider Git executable must be absolute",
+      );
+    }
+    if (
+      options.githubHostname !== undefined &&
+      !/^[A-Za-z0-9.-]+$/u.test(options.githubHostname)
+    ) {
+      throw new SymphonyError(
+        "delivery_provider_failed",
+        "Trusted provider GitHub hostname is invalid",
+      );
+    }
+    const sourceEnvironment = options.environment ?? process.env;
     this.#executable = options.executable;
     this.#timeoutMs = options.timeoutMs;
+    this.#sensitiveValues = [
+      ...new Set(
+        options.secretEnvironmentNames
+          .map((name) => sourceEnvironment[name])
+          .filter(
+            (value): value is string => value !== undefined && value.length > 0,
+          ),
+      ),
+    ].sort((left, right) => right.length - left.length);
     this.#environment = providerEnvironment(
-      options.environment ?? process.env,
+      sourceEnvironment,
       options.secretEnvironmentNames,
+      {
+        ...(options.gitExecutable === undefined
+          ? {}
+          : { SYMPHONY_GIT_EXECUTABLE: options.gitExecutable }),
+        ...(options.githubHostname === undefined
+          ? {}
+          : { SYMPHONY_GITHUB_HOSTNAME: options.githubHostname }),
+      },
     );
   }
 
@@ -449,10 +502,12 @@ export class ExternalDeliveryProvider implements DeliveryProvider {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        const providerStderr = Buffer.concat(stderr)
-          .subarray(-64 * 1024)
-          .toString("utf8")
-          .trim();
+        const providerStderr = this.#redact(
+          Buffer.concat(stderr)
+            .subarray(-64 * 1024)
+            .toString("utf8")
+            .trim(),
+        );
         if (timedOut) {
           reject(
             new SymphonyError(
@@ -496,7 +551,18 @@ export class ExternalDeliveryProvider implements DeliveryProvider {
         try {
           resolve(parseObservation(decoded));
         } catch (error) {
-          reject(error);
+          if (error instanceof SymphonyError) {
+            reject(
+              // Provider output is untrusted and may repeat a declared
+              // credential. Do not retain the original error as `cause`,
+              // because that would preserve the unredacted refusal reason.
+              new SymphonyError(error.code, this.#redact(error.message), {
+                context: error.context,
+              }),
+            );
+          } else {
+            reject(error);
+          }
         }
       });
       child.stdin.on("error", () => undefined);
@@ -504,5 +570,12 @@ export class ExternalDeliveryProvider implements DeliveryProvider {
         `${JSON.stringify({ ...request, protocolVersion: PROTOCOL_VERSION })}\n`,
       );
     });
+  }
+
+  #redact(message: string): string {
+    return this.#sensitiveValues.reduce(
+      (result, value) => result.replaceAll(value, "[REDACTED]"),
+      message,
+    );
   }
 }

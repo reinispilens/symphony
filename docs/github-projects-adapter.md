@@ -29,7 +29,7 @@ tracker:
     hostname: github.com # optional
     status_field: Status # optional
     priority_field: Priority # optional
-    agent_status_targets: [] # optional; exact statuses the agent may set
+    agent_status_targets: [] # compatibility only; managed sessions ignore it
     timeout_ms: 30000 # optional positive integer
 ```
 
@@ -110,11 +110,15 @@ to the configured owner/repository, and verifies the returned PR is closed. This
 attempt retire the stale delivery named by a surviving review comment without exposing general
 GitHub access.
 
-`github_project_status_update` is advertised only when `agent_status_targets` is non-empty. Its
-input schema contains those configured values as an enum. The adapter rejects every other target,
-resolves the configured Status field and option IDs, performs `updateProjectV2ItemFieldValue`, and
-verifies the returned item and Status. Thus lane names remain workflow data and an agent cannot use
-the tool for a human-only transition unless the repository explicitly authorizes that target.
+For a managed version-3 deployment, `github_project_status_update` is derived from the tracker
+policy pinned on that WorkSession. Its enum contains exactly the non-terminal lanes whose `writers`
+include `agent`; provider `agent_status_targets` is ignored. This keeps terminal lifecycle lanes
+such as `Done` behind Symphony's typed state control and prevents a stale provider list from
+granting the human-only `Merging` lane. A compatibility deployment has no pinned policy, so it
+continues to advertise the tool only when its provider `agent_status_targets` is non-empty.
+
+For either form, the adapter rejects every other target, resolves the configured Status field and
+option IDs, performs `updateProjectV2ItemFieldValue`, and verifies the returned item and Status.
 
 The adapter also provides driver-only fresh-attempt controls which are never advertised to Codex.
 One deletes exactly the single managed workpad; the other upserts a provisioning-blocker workpad

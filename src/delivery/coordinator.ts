@@ -1,4 +1,5 @@
 import { errorMessage, SymphonyError } from "../errors.js";
+import type { DeliveryOperation } from "../governance/model.js";
 import type {
   DeliveryPhase,
   DeliveryState,
@@ -53,6 +54,8 @@ export interface ResumeDeliveryOptions {
   readonly controllerGeneration: number;
   readonly tracker: TrackerDeliveryAuthority;
 }
+
+export type AbandonDeliveryOptions = ResumeDeliveryOptions;
 
 function deliveryRefused(message: string): SymphonyError {
   return new SymphonyError("delivery_refused", message);
@@ -124,6 +127,24 @@ function validateTrackerAuthority(
       "Interactive delivery authority must remain boardless and issue-free",
     );
   }
+  if (
+    new Set(tracker.permittedOperations).size !==
+    tracker.permittedOperations.length
+  ) {
+    throw deliveryRefused(
+      "Tracker delivery authority contains duplicate permitted operations",
+    );
+  }
+}
+
+function requireOperation(
+  tracker: TrackerDeliveryAuthority,
+  operation: DeliveryOperation,
+  message: string,
+): void {
+  if (!tracker.permittedOperations.includes(operation)) {
+    throw deliveryRefused(message);
+  }
 }
 
 function requiredDelivery(session: WorkSessionSnapshot): DeliveryState {
@@ -141,14 +162,17 @@ function requestBase(
   const delivery = requiredDelivery(session);
   const lease = deliveryLease(session);
   const grant = session.configuration?.deliveryGrant;
+  const proofAuthority = session.configuration?.proofAuthority;
   if (
     grant === null ||
     grant === undefined ||
+    proofAuthority === null ||
+    proofAuthority === undefined ||
     delivery.branch === null ||
     delivery.immutableHeadSha === null
   ) {
     throw deliveryRefused(
-      "Delivery has no pinned product-owner grant or immutable head",
+      "Delivery has no pinned product-owner grant, operator proof authority, or immutable head",
     );
   }
   return {
@@ -158,6 +182,7 @@ function requestBase(
     controllerGeneration: session.controller.generation,
     repositoryIdentity: session.repositoryIdentity,
     grant,
+    proofAuthority,
     tracker,
     branch: delivery.branch,
     baseRef: lease.baseRef,
@@ -168,6 +193,7 @@ function requestBase(
 function exactPullRequest(
   session: WorkSessionSnapshot,
   observation: DeliveryObservation,
+  allowClosed = false,
 ): NonNullable<DeliveryObservation["pullRequest"]> | null {
   const delivery = requiredDelivery(session);
   const lease = deliveryLease(session);
@@ -182,7 +208,7 @@ function exactPullRequest(
       "Observed pull request is not bound to the exact branch, base, and immutable head",
     );
   }
-  if (pullRequest.state === "closed") {
+  if (pullRequest.state === "closed" && !allowClosed) {
     throw deliveryRefused("The exact pull request was closed without merge");
   }
   if (pullRequest.state === "merged" && pullRequest.mergeSha === null) {
@@ -266,21 +292,21 @@ export class DeliveryCoordinator {
       const delivery = requiredDelivery(session);
       switch (delivery.phase) {
         case "intent_recorded":
-          if (!options.tracker.permitsDelivery) {
-            throw deliveryRefused(
-              "Current tracker authority does not permit remote delivery",
-            );
-          }
+          requireOperation(
+            options.tracker,
+            "push",
+            "Current tracker authority does not permit remote delivery",
+          );
           session = this.#transition(session, ["intent_recorded"], {
             phase: "push_pending",
           });
           break;
         case "push_pending": {
-          if (!options.tracker.permitsDelivery) {
-            throw deliveryRefused(
-              "Current tracker authority no longer permits the pending push",
-            );
-          }
+          requireOperation(
+            options.tracker,
+            "push",
+            "Current tracker authority no longer permits the pending push",
+          );
           const key = `delivery:push:${delivery.immutableHeadSha}`;
           const effect = this.#effect(session, "delivery.push", key);
           const before = await this.#observe(
@@ -325,11 +351,11 @@ export class DeliveryCoordinator {
           });
           break;
         case "pull_request_pending": {
-          if (!options.tracker.permitsDelivery) {
-            throw deliveryRefused(
-              "Current tracker authority no longer permits pull-request creation",
-            );
-          }
+          requireOperation(
+            options.tracker,
+            "openPullRequest",
+            "Current tracker authority no longer permits pull-request creation",
+          );
           const key = `delivery:pull-request:${delivery.immutableHeadSha}`;
           const effect = this.#effect(
             session,
@@ -384,6 +410,11 @@ export class DeliveryCoordinator {
           });
           break;
         case "checks_pending": {
+          requireOperation(
+            options.tracker,
+            "observeChecks",
+            "Current tracker authority does not permit required-check observation",
+          );
           const observation = await this.#observe(
             session,
             options.tracker,
@@ -404,6 +435,7 @@ export class DeliveryCoordinator {
                 "The exact pull request merged without every accepted required check passing",
               );
             }
+            this.#requirePassedProof(session, observation, checks);
             session = this.#transition(session, ["checks_pending"], {
               phase: "merged",
               requiredChecks: checks,
@@ -421,6 +453,7 @@ export class DeliveryCoordinator {
           if (checks.some((check) => check.status !== "passed")) {
             return { status: "product_failed", session };
           }
+          this.#requirePassedProof(session, observation, checks);
           session = this.#transition(session, ["checks_pending"], {
             phase: "review_pending",
             requiredChecks: checks,
@@ -428,6 +461,11 @@ export class DeliveryCoordinator {
           break;
         }
         case "review_pending": {
+          requireOperation(
+            options.tracker,
+            "observeMerge",
+            "Current tracker authority does not permit merge observation",
+          );
           const observation = await this.#observe(
             session,
             options.tracker,
@@ -463,6 +501,11 @@ export class DeliveryCoordinator {
               "Pending merge no longer has both full-in-scope and current tracker authority",
             );
           }
+          requireOperation(
+            options.tracker,
+            "mergePullRequest",
+            "Current tracker authority no longer permits merge",
+          );
           const key = `delivery:merge:${delivery.immutableHeadSha}`;
           const effect = this.#effect(session, "delivery.merge", key);
           let observation = await this.#observe(
@@ -514,6 +557,11 @@ export class DeliveryCoordinator {
           if (!options.tracker.permitsCleanup) {
             return { status: "awaiting_cleanup_authority", session };
           }
+          requireOperation(
+            options.tracker,
+            "releaseRemoteBranch",
+            "Current tracker authority does not permit remote-branch release",
+          );
           {
             const effect = this.#effect(
               session,
@@ -531,6 +579,11 @@ export class DeliveryCoordinator {
           if (!options.tracker.permitsCleanup) {
             return { status: "awaiting_cleanup_authority", session };
           }
+          requireOperation(
+            options.tracker,
+            "releaseRemoteBranch",
+            "Current tracker authority does not permit remote-branch release",
+          );
           const key = `delivery:delete-remote-branch:${delivery.immutableHeadSha}`;
           const effect = this.#effect(
             session,
@@ -567,6 +620,7 @@ export class DeliveryCoordinator {
               {
                 ...requestBase(session, options.tracker, key),
                 operation: "delete_remote_branch",
+                sourceRoot: deliveryLease(session).sourceRoot,
                 expectedRemoteHeadSha: delivery.immutableHeadSha!,
               },
             );
@@ -607,6 +661,143 @@ export class DeliveryCoordinator {
     return this.#transition(session, ["cleanup_pending"], {
       phase: "completed",
       cleanupStatus: options.cleanupStatus,
+    });
+  }
+
+  async abandon(options: AbandonDeliveryOptions): Promise<{
+    readonly status: "cleanup_required";
+    readonly session: WorkSessionSnapshot;
+  }> {
+    let session = requiredSession(
+      this.#stateStore,
+      options.sessionId,
+      options.controllerGeneration,
+    );
+    validateTrackerAuthority(session, options.tracker);
+    const delivery = requiredDelivery(session);
+    if (delivery.phase === "completed") {
+      throw deliveryRefused(
+        "Completed delivery cannot be abandoned for Rework",
+      );
+    }
+    requireOperation(
+      options.tracker,
+      "releaseRemoteBranch",
+      "Current tracker authority does not permit delivery release for Rework",
+    );
+    requireOperation(
+      options.tracker,
+      "cleanupWorkspace",
+      "Current tracker authority does not permit workspace cleanup for Rework",
+    );
+
+    const observeKey = `delivery:abandon:${delivery.immutableHeadSha}`;
+    let observation = await this.#observe(session, options.tracker, observeKey);
+    let pullRequest = exactPullRequest(session, observation, true);
+    if (pullRequest?.state === "merged") {
+      throw deliveryRefused(
+        "An exact merged pull request must complete delivery; it cannot be abandoned",
+      );
+    }
+    if (pullRequest !== null) {
+      const closeEffect = this.#effect(
+        session,
+        "delivery.close_pull_request",
+        `${observeKey}:close-pull-request`,
+      );
+      if (pullRequest.state === "open") {
+        if (closeEffect.status === "applied") {
+          throw deliveryRefused(
+            `Applied pull-request closure ${closeEffect.id} is no longer reflected by provider truth`,
+          );
+        }
+        observation = await this.#executeMutation(
+          session,
+          options.tracker,
+          closeEffect,
+          {
+            ...requestBase(
+              session,
+              options.tracker,
+              `${observeKey}:close-pull-request`,
+            ),
+            operation: "close_pull_request",
+            pullRequestId: pullRequest.id,
+          },
+        );
+        pullRequest = exactPullRequest(session, observation, true);
+      }
+      if (pullRequest?.state !== "closed") {
+        throw deliveryRefused(
+          "Delivery provider did not confirm exact pull-request closure",
+        );
+      }
+      this.#finishEffect(closeEffect, { pull_request_state: "closed" });
+    }
+
+    const releaseEffect = this.#effect(
+      session,
+      "delivery.delete_remote_branch",
+      `${observeKey}:delete-remote-branch`,
+    );
+    if (observation.remoteHeadSha !== null) {
+      exactRemoteHead(session, observation, false);
+      if (releaseEffect.status === "applied") {
+        throw deliveryRefused(
+          `Applied remote-branch release ${releaseEffect.id} is no longer reflected by provider truth`,
+        );
+      }
+      observation = await this.#executeMutation(
+        session,
+        options.tracker,
+        releaseEffect,
+        {
+          ...requestBase(
+            session,
+            options.tracker,
+            `${observeKey}:delete-remote-branch`,
+          ),
+          operation: "delete_remote_branch",
+          sourceRoot: deliveryLease(session).sourceRoot,
+          expectedRemoteHeadSha: delivery.immutableHeadSha!,
+        },
+      );
+    }
+    if (observation.remoteHeadSha !== null) {
+      throw deliveryRefused(
+        "Delivery provider did not confirm exact remote-branch removal for Rework",
+      );
+    }
+    this.#finishEffect(releaseEffect, { remote_branch: "absent" });
+    session = this.#transition(session, [delivery.phase], {
+      phase: "refused",
+      remoteHeadSha: null,
+      cleanupStatus: "pending",
+      releaseIntentId: releaseEffect.id,
+      error: "Delivery abandoned before a fresh Rework Attempt",
+    });
+    return { status: "cleanup_required", session };
+  }
+
+  completeAbandonmentCleanup(
+    options: AbandonDeliveryOptions,
+  ): WorkSessionSnapshot {
+    const session = requiredSession(
+      this.#stateStore,
+      options.sessionId,
+      options.controllerGeneration,
+    );
+    validateTrackerAuthority(session, options.tracker);
+    const delivery = requiredDelivery(session);
+    if (delivery.phase !== "refused" || delivery.lastError === null) {
+      throw deliveryRefused(
+        "Delivery has no abandoned Rework cleanup to complete",
+      );
+    }
+    return this.#transition(session, ["refused"], {
+      phase: "refused",
+      cleanupStatus: "completed",
+      error: delivery.lastError,
     });
   }
 
@@ -731,6 +922,35 @@ export class DeliveryCoordinator {
           now: this.#timestamp(),
         });
       }
+    }
+  }
+
+  #requirePassedProof(
+    session: WorkSessionSnapshot,
+    observation: DeliveryObservation,
+    checks: DeliveryState["requiredChecks"],
+  ): void {
+    const head = requiredDelivery(session).immutableHeadSha;
+    if (head === null) throw deliveryRefused("Delivery proof head is missing");
+    const admitted = observation.proof.filter((proof) => {
+      const check = checks.find(
+        (candidate) => candidate.name === proof.checkName,
+      );
+      return (
+        check !== undefined &&
+        check.checkRunId !== null &&
+        check.workflowRunId !== null &&
+        proof.checkRunId !== null &&
+        proof.workflowRunId !== null &&
+        proof.sourceSha === head &&
+        proof.checkRunId === check.checkRunId &&
+        proof.workflowRunId === check.workflowRunId
+      );
+    });
+    if (admitted.length !== 1 || admitted[0]?.status !== "passed") {
+      throw deliveryRefused(
+        "Passed required checks must include exactly one exact-head passed protected-proof correlation",
+      );
     }
   }
 

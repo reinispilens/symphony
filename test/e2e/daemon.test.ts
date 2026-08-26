@@ -17,7 +17,10 @@ import { describe, expect, it } from "vitest";
 import { buildDaemonHost } from "../../src/cli.js";
 import { nullLogger } from "../../src/observability/logger.js";
 import { SqliteSymphonyStateStore } from "../../src/state/sqlite-store.js";
-import { withTempDirectory } from "../support/factories.js";
+import {
+  acceptedGovernanceFixture,
+  withTempDirectory,
+} from "../support/factories.js";
 
 const fakeAppServer = fileURLToPath(
   new URL("../fixtures/fake-codex-app-server.mjs", import.meta.url),
@@ -53,7 +56,9 @@ process.stdin.on("end", () => {
     },
     statusValue: {
       __typename: "ProjectV2ItemFieldSingleSelectValue",
+      id: "STATUS_" + status.replaceAll(" ", "_"),
       name: status,
+      updatedAt: "2026-08-26T10:00:00Z",
     },
     priorityValue: {
       __typename: "ProjectV2ItemFieldSingleSelectValue",
@@ -75,7 +80,7 @@ process.stdin.on("end", () => {
         owner: { login: "acme" },
       },
       labels: {
-        nodes: [{ name: "ready" }],
+        nodes: [{ name: "ready" }, { name: "driver:symphony" }],
         pageInfo: { hasNextPage: false, endCursor: null },
       },
       assignees: { nodes: [] },
@@ -304,6 +309,7 @@ Work on {{ issue.identifier }}: {{ issue.title }}.
   it("runs and cleans a managed Git worktree with no product lifecycle hooks", async () => {
     await withTempDirectory(async (directory) => {
       const binDirectory = path.join(directory, "bin");
+      const governanceRoot = path.join(directory, "governance");
       const operatorRoot = path.join(directory, "operator");
       const sourceRoot = path.join(directory, "source");
       const stateRoot = path.join(directory, "state");
@@ -317,6 +323,7 @@ Work on {{ issue.identifier }}: {{ issue.title }}.
       );
       await Promise.all([
         mkdir(binDirectory, { recursive: true }),
+        mkdir(path.join(governanceRoot, "agent-system"), { recursive: true }),
         mkdir(operatorRoot),
         mkdir(path.join(sourceRoot, ".symphony"), { recursive: true }),
       ]);
@@ -406,12 +413,90 @@ importers:
         "rev-parse",
         "HEAD",
       ]);
+      await run("git", ["-C", governanceRoot, "init", "-b", "main"]);
+      await run("git", [
+        "-C",
+        governanceRoot,
+        "config",
+        "user.name",
+        "Symphony Test",
+      ]);
+      await run("git", [
+        "-C",
+        governanceRoot,
+        "config",
+        "user.email",
+        "symphony@example.test",
+      ]);
+      await run("git", [
+        "-C",
+        governanceRoot,
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/reinispilens/.github.git",
+      ]);
+      const policyPath = "agent-system/tracker-policy.json";
+      const doctrinePath = "agent-system/golden-principles.md";
+      const manifestPath = "agent-system/accepted-governance.json";
+      const policySnapshot = acceptedGovernanceFixture().trackerPolicy;
+      const policyDocument = Object.fromEntries(
+        Object.entries(policySnapshot).filter(([key]) => key !== "source"),
+      );
+      const policyBytes = `${JSON.stringify(policyDocument, null, 2)}\n`;
+      const doctrineBytes = "# Accepted e2e doctrine\n";
+      await Promise.all([
+        writeFile(path.join(governanceRoot, policyPath), policyBytes),
+        writeFile(path.join(governanceRoot, doctrinePath), doctrineBytes),
+      ]);
+      await run("git", ["-C", governanceRoot, "add", "."]);
+      await run("git", [
+        "-C",
+        governanceRoot,
+        "commit",
+        "-m",
+        "accepted governance",
+      ]);
+      const acceptedRevision = await run("git", [
+        "-C",
+        governanceRoot,
+        "rev-parse",
+        "HEAD",
+      ]);
+      const manifestBytes = `${JSON.stringify(
+        {
+          schemaVersion: 1,
+          repositoryIdentity: "reinispilens/.github",
+          acceptedRevision,
+          artifacts: {
+            doctrine: { path: doctrinePath, digest: digest(doctrineBytes) },
+            trackerPolicy: { path: policyPath, digest: digest(policyBytes) },
+          },
+        },
+        null,
+        2,
+      )}\n`;
+      await writeFile(path.join(governanceRoot, manifestPath), manifestBytes);
+      await run("git", ["-C", governanceRoot, "add", manifestPath]);
+      await run("git", [
+        "-C",
+        governanceRoot,
+        "commit",
+        "-m",
+        "publish governance",
+      ]);
+      const manifestRevision = await run("git", [
+        "-C",
+        governanceRoot,
+        "rev-parse",
+        "HEAD",
+      ]);
       const bindingPath = path.join(operatorRoot, "widgets.json");
       await writeFile(
         bindingPath,
         `${JSON.stringify(
           {
-            schemaVersion: 1,
+            schemaVersion: 3,
             id: "widgets-e2e",
             productProfile: {
               repositoryIdentity: "acme/widgets",
@@ -424,6 +509,15 @@ importers:
             workspaceRoot,
             branchPrefix: "symphony/",
             gitExecutable: await realpath(await run("which", ["git"])),
+            governance: {
+              repositoryIdentity: "reinispilens/.github",
+              sourceRoot: governanceRoot,
+              manifest: {
+                path: manifestPath,
+                revision: manifestRevision,
+                digest: digest(manifestBytes),
+              },
+            },
             tracker: {
               kind: "github-projects",
               provider: {
@@ -431,13 +525,8 @@ importers:
                 repo: "widgets",
                 project: 28,
               },
-              requiredLabels: ["ready"],
-              excludedLabels: ["driver:direct"],
-              activeStates: ["Todo", "In Progress"],
-              terminalStates: ["Done", "Cancelled"],
-              freshAttemptStates: [],
-              freshAttemptFailureState: null,
             },
+            deliveryProvider: null,
             polling: { intervalMs: 50 },
             preparation: {
               timeoutMs: 30_000,

@@ -4,7 +4,12 @@ import type { Issue } from "../../domain/issue.js";
 import type { AgentToolRuntime } from "../../agent/tools.js";
 import { isRecord } from "../../shared/json.js";
 import { nullLogger, type Logger } from "../../observability/logger.js";
-import type { FreshAttemptControl, TrackerAdapter } from "../adapter.js";
+import type {
+  FreshAttemptControl,
+  TrackerAgentToolContext,
+  TrackerAdapter,
+  TrackerStateControl,
+} from "../adapter.js";
 import { TrackerError } from "../errors.js";
 import type { GraphqlClient } from "./gh-graphql-client.js";
 import {
@@ -44,8 +49,6 @@ interface LabelPage {
 }
 
 export interface GitHubProjectsAdapterOptions {
-  readonly activeStates: readonly string[];
-  readonly freshAttemptStates?: readonly string[];
   readonly client: GraphqlClient;
   readonly config: GitHubProjectsConfig;
   readonly logger?: Logger;
@@ -187,32 +190,27 @@ function itemIdForLog(value: unknown): string {
 }
 
 export class GitHubProjectsAdapter implements TrackerAdapter {
-  readonly #activeStates: ReadonlySet<string>;
-  readonly #freshAttemptStates: ReadonlySet<string>;
   readonly #client: GraphqlClient;
   readonly #config: GitHubProjectsConfig;
   readonly #logger: Logger;
 
   constructor(options: GitHubProjectsAdapterOptions) {
-    this.#activeStates = new Set(options.activeStates.map(normalizedState));
-    this.#freshAttemptStates = new Set(
-      (options.freshAttemptStates ?? []).map(normalizedState),
-    );
     this.#client = options.client;
     this.#config = options.config;
     this.#logger = options.logger ?? nullLogger;
   }
 
-  agentToolRuntime(issue: Issue): AgentToolRuntime {
+  agentToolRuntime(
+    issue: Issue,
+    context: TrackerAgentToolContext = { freshAttempt: false },
+  ): AgentToolRuntime {
     return new GitHubProjectsAgentToolRuntime(
       this.#client,
-      this.#config,
+      context.statusTargets === undefined
+        ? this.#config
+        : { ...this.#config, agentStatusTargets: context.statusTargets },
       issue,
-      {
-        freshAttempt: this.#freshAttemptStates.has(
-          normalizedState(issue.state),
-        ),
-      },
+      context,
     );
   }
 
@@ -222,6 +220,49 @@ export class GitHubProjectsAdapter implements TrackerAdapter {
       this.#config,
       issue,
     );
+  }
+
+  stateControl(issue: Issue): TrackerStateControl {
+    return {
+      transition: async (targetState, expectedStateVersion) => {
+        const current = (await this.fetchIssuesByIds([issue.id]))[0];
+        if (current === undefined) {
+          throw new TrackerError(
+            "tracker_response",
+            `GitHub Project item ${issue.id} is no longer visible`,
+          );
+        }
+        if (normalizedState(current.state) === normalizedState(targetState)) {
+          return current;
+        }
+        if (
+          expectedStateVersion === null ||
+          current.state_version !== expectedStateVersion
+        ) {
+          throw new TrackerError(
+            "tracker_response",
+            `GitHub Project item ${issue.id} changed before Symphony could select ${targetState}`,
+          );
+        }
+        const runtime = new GitHubProjectsAgentToolRuntime(
+          this.#client,
+          this.#config,
+          current,
+        );
+        await runtime.setStatusForOrchestration(targetState);
+        const updated = (await this.fetchIssuesByIds([issue.id]))[0];
+        if (
+          updated === undefined ||
+          normalizedState(updated.state) !== normalizedState(targetState)
+        ) {
+          throw new TrackerError(
+            "tracker_response",
+            `GitHub did not confirm Project item ${issue.id} in ${targetState}`,
+          );
+        }
+        return updated;
+      },
+    };
   }
 
   async fetchIssuesByStates(
@@ -439,9 +480,10 @@ export class GitHubProjectsAdapter implements TrackerAdapter {
       assignee_id: firstAssigneeId(content),
       labels: normalizeLabels(allLabels),
       blocked_by: [],
-      dispatchable:
-        issueState.toUpperCase() === "OPEN" &&
-        this.#activeStates.has(normalizedState(state)),
+      // State eligibility belongs to the policy pinned on each WorkSession.
+      // Keeping this provider fact limited to issue openness lets an older
+      // session retain its accepted lane meanings after a deployment repin.
+      dispatchable: issueState.toUpperCase() === "OPEN",
       created_at: optionalTimestamp(content["createdAt"]),
       updated_at: optionalTimestamp(content["updatedAt"]),
     };

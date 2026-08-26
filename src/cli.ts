@@ -4,6 +4,10 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { AgentRunner } from "./agent/runner.js";
+import { DeliveryCoordinator } from "./delivery/coordinator.js";
+import { TrustedDeliveryExecution } from "./delivery/execution.js";
+import { TrustedSourceMaterializer } from "./delivery/materializer.js";
+import { ExternalDeliveryProvider } from "./delivery/provider.js";
 import { resolveDeploymentBinding } from "./deployment/resolver.js";
 import { errorMessage, SymphonyError } from "./errors.js";
 import { JsonLineLogger, type Logger } from "./observability/logger.js";
@@ -211,13 +215,46 @@ export async function buildDaemonHost(
       stateStore,
     }),
   });
+  const agentRunner = new AgentRunner({
+    logger: options.logger,
+    preparationDriver,
+    processEnvironment: options.environment,
+    repositoryDriver,
+  });
+  const deployment = workflowStore.current.config.deployment;
+  const deliveryExecution =
+    deployment?.deliveryProvider === null ||
+    deployment?.deliveryProvider === undefined
+      ? undefined
+      : new TrustedDeliveryExecution({
+          stateStore,
+          workspace: agentRunner,
+          materializer: new TrustedSourceMaterializer({
+            gitExecutable: deployment.gitExecutable,
+            stateRoot: deployment.stateRoot,
+            stateStore,
+          }),
+          coordinator: new DeliveryCoordinator({
+            stateStore,
+            provider: new ExternalDeliveryProvider({
+              executable: deployment.deliveryProvider.executable,
+              timeoutMs: deployment.deliveryProvider.timeoutMs,
+              secretEnvironmentNames:
+                deployment.deliveryProvider.secretEnvironmentNames,
+              environment: options.environment,
+              gitExecutable: deployment.gitExecutable,
+              githubHostname:
+                typeof workflowStore.current.config.tracker.provider[
+                  "hostname"
+                ] === "string"
+                  ? workflowStore.current.config.tracker.provider["hostname"]
+                  : "github.com",
+            }),
+          }),
+        });
   const hostOrchestrator = new Orchestrator({
-    agentRunner: new AgentRunner({
-      logger: options.logger,
-      preparationDriver,
-      processEnvironment: options.environment,
-      repositoryDriver,
-    }),
+    agentRunner,
+    ...(deliveryExecution === undefined ? {} : { deliveryExecution }),
     logger: options.logger,
     stateStore,
     trackerFactory: (workflow) => trackerFactory.create(workflow),

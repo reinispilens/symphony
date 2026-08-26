@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import type { DeploymentBindingDocument } from "../../src/deployment/model.js";
 import { resolveDeploymentBinding } from "../../src/deployment/resolver.js";
 import {
+  acceptedGovernanceFixture,
   testTrackerProfiles,
   withTempDirectory,
 } from "../support/factories.js";
@@ -29,7 +30,10 @@ function digest(bytes: string | Buffer): string {
 }
 
 interface Fixture {
-  readonly binding: DeploymentBindingDocument;
+  readonly binding: Extract<
+    DeploymentBindingDocument,
+    { readonly schemaVersion: 1 }
+  >;
   readonly bindingPath: string;
   readonly profilePath: string;
   readonly sourceRoot: string;
@@ -123,7 +127,10 @@ async function fixture(directory: string): Promise<Fixture> {
     ].join("\n"),
   );
   await chmod(pnpmEntryPoint, 0o755);
-  const binding: DeploymentBindingDocument = {
+  const binding: Extract<
+    DeploymentBindingDocument,
+    { readonly schemaVersion: 1 }
+  > = {
     schemaVersion: 1,
     id: "widgets-local",
     productProfile: {
@@ -281,7 +288,245 @@ async function selectDeliveryGrant(
   return binding;
 }
 
+interface V3Fixture {
+  readonly binding: Extract<
+    DeploymentBindingDocument,
+    { readonly schemaVersion: 3 }
+  >;
+  readonly doctrine: {
+    readonly revision: string;
+    readonly digest: string;
+  };
+  readonly governanceRoot: string;
+  readonly policy: {
+    readonly path: string;
+    readonly revision: string;
+    readonly digest: string;
+  };
+}
+
+async function selectAcceptedGovernance(setup: Fixture): Promise<V3Fixture> {
+  const root = path.dirname(setup.sourceRoot);
+  const governanceRoot = path.join(root, "governance");
+  await mkdir(path.join(governanceRoot, "agent-system"), { recursive: true });
+  await command("git", ["init", "-b", "main", governanceRoot]);
+  await command("git", ["-C", governanceRoot, "config", "user.name", "Test"]);
+  await command("git", [
+    "-C",
+    governanceRoot,
+    "config",
+    "user.email",
+    "test@example.test",
+  ]);
+  await command("git", [
+    "-C",
+    governanceRoot,
+    "remote",
+    "add",
+    "origin",
+    "https://github.com/reinispilens/.github.git",
+  ]);
+
+  const policyPath = "agent-system/tracker-policy.json";
+  const doctrinePath = "agent-system/golden-principles.md";
+  const manifestPath = "agent-system/accepted-governance.json";
+  const policySnapshot = acceptedGovernanceFixture().trackerPolicy;
+  const policyDocument = Object.fromEntries(
+    Object.entries(policySnapshot).filter(([key]) => key !== "source"),
+  );
+  const policyBytes = `${JSON.stringify(policyDocument, null, 2)}\n`;
+  const doctrineBytes =
+    "# Accepted test doctrine\n\n- Keep authority explicit.\n";
+  await Promise.all([
+    writeFile(path.join(governanceRoot, policyPath), policyBytes),
+    writeFile(path.join(governanceRoot, doctrinePath), doctrineBytes),
+  ]);
+  await command("git", ["-C", governanceRoot, "add", "."]);
+  await command("git", [
+    "-C",
+    governanceRoot,
+    "commit",
+    "-m",
+    "accepted governance artifacts",
+  ]);
+  const acceptedRevision = await command("git", [
+    "-C",
+    governanceRoot,
+    "rev-parse",
+    "HEAD",
+  ]);
+  const manifest = {
+    schemaVersion: 1,
+    repositoryIdentity: "reinispilens/.github",
+    acceptedRevision,
+    artifacts: {
+      doctrine: { path: doctrinePath, digest: digest(doctrineBytes) },
+      trackerPolicy: { path: policyPath, digest: digest(policyBytes) },
+    },
+  };
+  const manifestBytes = `${JSON.stringify(manifest, null, 2)}\n`;
+  await writeFile(path.join(governanceRoot, manifestPath), manifestBytes);
+  await command("git", ["-C", governanceRoot, "add", manifestPath]);
+  await command("git", [
+    "-C",
+    governanceRoot,
+    "commit",
+    "-m",
+    "publish accepted governance",
+  ]);
+  const manifestRevision = await command("git", [
+    "-C",
+    governanceRoot,
+    "rev-parse",
+    "HEAD",
+  ]);
+
+  const profileFile = path.join(setup.sourceRoot, setup.profilePath);
+  const profile = JSON.parse(await readFile(profileFile, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  profile["schemaVersion"] = 2;
+  profile["deliveryGrant"] = {
+    authority: "full-in-scope",
+    governingPolicy: {
+      repositoryIdentity: "reinispilens/.github",
+      path: policyPath,
+      revision: acceptedRevision,
+      digest: digest(policyBytes),
+    },
+    requiredChecks: ["proof / Protected final"],
+  };
+  const profileBytes = `${JSON.stringify(profile, null, 2)}\n`;
+  await writeFile(profileFile, profileBytes);
+  await command("git", ["-C", setup.sourceRoot, "add", setup.profilePath]);
+  await command("git", [
+    "-C",
+    setup.sourceRoot,
+    "commit",
+    "-m",
+    "select accepted governance",
+  ]);
+  const profileRevision = await command("git", [
+    "-C",
+    setup.sourceRoot,
+    "rev-parse",
+    "HEAD",
+  ]);
+  const providerExecutable = path.join(
+    path.dirname(setup.binding.runtime.codexExecutable),
+    "delivery-provider-v3",
+  );
+  await writeFile(providerExecutable, "#!/bin/sh\nexit 0\n");
+  await chmod(providerExecutable, 0o755);
+
+  const binding: Extract<
+    DeploymentBindingDocument,
+    { readonly schemaVersion: 3 }
+  > = {
+    ...setup.binding,
+    schemaVersion: 3,
+    productProfile: {
+      ...setup.binding.productProfile,
+      revision: profileRevision,
+      digest: digest(profileBytes),
+    },
+    governance: {
+      repositoryIdentity: "reinispilens/.github",
+      sourceRoot: governanceRoot,
+      manifest: {
+        path: manifestPath,
+        revision: manifestRevision,
+        digest: digest(manifestBytes),
+      },
+    },
+    tracker: {
+      kind: setup.binding.tracker.kind,
+      provider: setup.binding.tracker.provider,
+    },
+    deliveryProvider: {
+      protocolVersion: 1,
+      executable: providerExecutable,
+      timeoutMs: 30_000,
+      secretEnvironmentNames: ["DELIVERY_TOKEN"],
+      proofAuthority: {
+        kind: "github-actions-reusable-workflow-v1",
+        requiredCheck: "proof / Protected final",
+        eventName: "pull_request_target",
+        callerWorkflowPath: ".github/workflows/protected-proof-v2.yml",
+        controlWorkflow: {
+          repositoryIdentity: "reinispilens/workspace-control-plane",
+          path: ".github/workflows/protected-proof-v2.yml",
+          revision: "4".repeat(40),
+        },
+      },
+    },
+  };
+  await writeFile(setup.bindingPath, `${JSON.stringify(binding, null, 2)}\n`);
+  return {
+    binding,
+    doctrine: { revision: acceptedRevision, digest: digest(doctrineBytes) },
+    governanceRoot,
+    policy: {
+      path: policyPath,
+      revision: acceptedRevision,
+      digest: digest(policyBytes),
+    },
+  };
+}
+
 describe("deployment binding resolver", () => {
+  it("resolves v3 governance from exact Git blobs and removes policy duplication from the binding", async () => {
+    await withTempDirectory(async (directory) => {
+      const setup = await fixture(directory);
+      const accepted = await selectAcceptedGovernance(setup);
+      await writeFile(
+        path.join(accepted.governanceRoot, accepted.policy.path),
+        '{"candidate":"must not win"}\n',
+      );
+
+      const resolved = await resolveDeploymentBinding({
+        bindingPath: setup.bindingPath,
+        trackerProfiles: testTrackerProfiles,
+        environment: { DELIVERY_TOKEN: "operator-secret" },
+      });
+
+      expect(resolved.governance?.manifest.acceptedRevision).toBe(
+        accepted.policy.revision,
+      );
+      expect(resolved.serviceConfig.deployment?.doctrine).toMatchObject(
+        accepted.doctrine,
+      );
+      expect(resolved.acceptedConfiguration.governanceManifest).toEqual(
+        resolved.governance?.manifestReference,
+      );
+      expect(resolved.acceptedConfiguration.trackerPolicy?.source).toEqual({
+        repositoryIdentity: "reinispilens/.github",
+        ...accepted.policy,
+      });
+      expect(
+        resolved.acceptedConfiguration.deliveryGrant?.governingPolicy,
+      ).toEqual(resolved.acceptedConfiguration.trackerPolicy?.source);
+      expect(resolved.acceptedConfiguration.proofAuthority).toEqual(
+        accepted.binding.deliveryProvider?.proofAuthority,
+      );
+      expect(resolved.serviceConfig.tracker).toMatchObject({
+        requiredLabels: ["driver:symphony"],
+        excludedLabels: ["driver:direct"],
+        activeStates: ["Todo", "In Progress", "Merging", "Rework"],
+        freshAttemptFailureState: "Human Review",
+      });
+      expect(accepted.binding.tracker).toEqual({
+        kind: "test",
+        provider: {
+          hostname: "github.com",
+          owner: "acme",
+          repo: "widgets",
+        },
+      });
+    });
+  });
+
   it("pins a v2 product-owner delivery grant while keeping provider credentials operator-owned", async () => {
     await withTempDirectory(async (directory) => {
       const setup = await fixture(directory);
@@ -302,9 +547,11 @@ describe("deployment binding resolver", () => {
         },
         requiredChecks: ["proof / Protected final"],
       });
-      expect(resolved.serviceConfig.deployment?.deliveryProvider).toEqual(
-        binding.deliveryProvider,
-      );
+      expect(resolved.serviceConfig.deployment?.deliveryProvider).toEqual({
+        ...binding.deliveryProvider,
+        proofAuthority: null,
+      });
+      expect(resolved.acceptedConfiguration.proofAuthority).toBeNull();
       expect(resolved.serviceConfig.tracker.secretEnvironmentNames).toContain(
         "DELIVERY_TOKEN",
       );

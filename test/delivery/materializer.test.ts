@@ -6,7 +6,11 @@ import { describe, expect, it } from "vitest";
 
 import { TrustedSourceMaterializer } from "../../src/delivery/materializer.js";
 import { SqliteSymphonyStateStore } from "../../src/state/sqlite-store.js";
-import { withTempDirectory } from "../support/factories.js";
+import {
+  acceptedGovernanceFixture,
+  protectedProofAuthorityFixture,
+  withTempDirectory,
+} from "../support/factories.js";
 
 const START = "2026-08-26T10:00:00.000Z";
 
@@ -23,6 +27,7 @@ function command(file: string, args: readonly string[]): Promise<string> {
 }
 
 function configuration() {
+  const governance = acceptedGovernanceFixture();
   return {
     productProfile: {
       repositoryIdentity: "acme/widgets",
@@ -37,20 +42,19 @@ function configuration() {
       entries: [],
     },
     deploymentBinding: { id: "widgets-test", digest: "sha256:binding" },
+    governanceManifest: governance.governanceManifest,
+    trackerPolicy: governance.trackerPolicy,
     deliveryGrant: {
       authority: "owner-gated" as const,
-      governingPolicy: {
-        repositoryIdentity: "acme/.github",
-        path: "agent-system/delivery-policy.json",
-        revision: "b".repeat(40),
-        digest: "sha256:policy",
-      },
+      governingPolicy: governance.trackerPolicy.source,
       requiredChecks: ["proof / Protected final"],
     },
+    proofAuthority: protectedProofAuthorityFixture(),
   };
 }
 
 async function fixture(directory: string) {
+  const governance = acceptedGovernanceFixture();
   const sourceRoot = path.join(directory, "source");
   const workspaceRoot = path.join(directory, "workspaces");
   const workspacePath = path.join(workspaceRoot, "widgets");
@@ -106,7 +110,7 @@ async function fixture(directory: string) {
     issueUrl: null,
     intent: "Materialize exactly the authored source",
     controllerId: "tracker:test:acme/widgets",
-    doctrine: null,
+    doctrine: governance.doctrine,
     configuration: configuration(),
     now: START,
   });

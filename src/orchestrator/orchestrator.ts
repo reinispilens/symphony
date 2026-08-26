@@ -3,15 +3,28 @@ import { randomUUID } from "node:crypto";
 import type { AgentRunOptions, AgentRunResult } from "../agent/runner.js";
 import { AgentError } from "../agent/errors.js";
 import type { AgentEvent } from "../agent/events.js";
+import type { DeliveryExecutionPort } from "../delivery/execution.js";
+import type { TrackerDeliveryAuthority } from "../delivery/provider.js";
 import type { Issue } from "../domain/issue.js";
 import { errorMessage, SymphonyError } from "../errors.js";
+import {
+  DELIVERY_OPERATIONS,
+  type DeliveryOperation,
+  type TrackerPolicySnapshot,
+} from "../governance/model.js";
+import {
+  deriveTrackerPolicyRuntime,
+  trackerLane,
+} from "../governance/tracker-policy.js";
 import { nullLogger, type Logger } from "../observability/logger.js";
 import type { RepositoryCleanupAuthority } from "../repository/driver.js";
 import type { JsonValue } from "../shared/json.js";
 import type {
   AttemptStatus,
   ExpiredRuntimeLeaseCandidate,
+  RepositoryContentSnapshot,
   StartedAttempt,
+  WorkSessionSnapshot,
   WorkspaceMode,
 } from "../state/model.js";
 import type { SymphonyStateStore } from "../state/store.js";
@@ -19,6 +32,7 @@ import { StateStoreError } from "../state/store.js";
 import type { TrackerAdapter } from "../tracker/adapter.js";
 import { freshAttemptGeneration } from "../workspace/fresh-attempt.js";
 import type { Workspace } from "../workspace/manager.js";
+import type { PromptAuthorityContext } from "../workflow/prompt.js";
 import type { ReloadResult, WorkflowSnapshot } from "../workflow/store.js";
 import {
   compareIssuesForDispatch,
@@ -73,6 +87,7 @@ export interface WorkflowSource {
 
 export interface OrchestratorOptions {
   readonly agentRunner: AgentExecutionPort;
+  readonly deliveryExecution?: DeliveryExecutionPort;
   readonly stateStore: SymphonyStateStore;
   readonly trackerFactory: TrackerAdapterFactory;
   readonly workflowStore: WorkflowSource;
@@ -87,6 +102,8 @@ interface RunningEntry {
   readonly attempt: number | null;
   readonly controllerGeneration: number;
   readonly freshAttemptGeneration: string | null;
+  readonly promptAuthority: PromptAuthorityContext;
+  readonly requiresFreshAttempt: boolean;
   readonly startedAtMs: number;
   readonly runtimeLeaseToken: string;
   readonly workSessionId: string;
@@ -147,6 +164,7 @@ export interface RunningSnapshotRow {
   };
   readonly turn_count: number;
   readonly work_session_id: string;
+  readonly governance: RuntimeGovernanceReferences;
 }
 
 export interface RetrySnapshotRow {
@@ -157,6 +175,21 @@ export interface RetrySnapshotRow {
   readonly issue_identifier: string;
   readonly issue_url: string | null;
   readonly kind: RetryKind;
+  readonly work_session_id: string;
+  readonly governance: RuntimeGovernanceReferences;
+}
+
+export interface RuntimeContentReference {
+  readonly repository_identity: string;
+  readonly path: string;
+  readonly revision: string;
+  readonly digest: string;
+}
+
+export interface RuntimeGovernanceReferences {
+  readonly doctrine: RuntimeContentReference | null;
+  readonly manifest: RuntimeContentReference | null;
+  readonly tracker_policy: RuntimeContentReference | null;
 }
 
 export interface RuntimeSnapshot {
@@ -175,22 +208,6 @@ export interface RuntimeSnapshot {
 
 function nextFailureAttempt(attempt: number | null): number {
   return attempt === null ? 1 : attempt + 1;
-}
-
-function generationForIssue(
-  issue: Issue,
-  workflow: WorkflowSnapshot,
-): string | null {
-  return stateIncluded(issue.state, workflow.config.tracker.freshAttemptStates)
-    ? freshAttemptGeneration(issue)
-    : null;
-}
-
-function issueInFreshAttemptState(
-  issue: Issue,
-  workflow: WorkflowSnapshot,
-): boolean {
-  return stateIncluded(issue.state, workflow.config.tracker.freshAttemptStates);
 }
 
 function isFreshAttemptRefusal(error: unknown): error is AgentError {
@@ -259,6 +276,212 @@ function expectedDispatchRefusal(error: unknown): error is StateStoreError {
   );
 }
 
+function workflowTrackerPolicy(
+  workflow: WorkflowSnapshot,
+): TrackerPolicySnapshot | null {
+  return (
+    workflow.config.deployment?.acceptedConfiguration.trackerPolicy ?? null
+  );
+}
+
+function sessionTrackerPolicy(
+  session: WorkSessionSnapshot | null,
+  workflow: WorkflowSnapshot,
+): TrackerPolicySnapshot | null {
+  return (
+    session?.configuration?.trackerPolicy ?? workflowTrackerPolicy(workflow)
+  );
+}
+
+function candidateAgentStatusTargets(
+  policy: TrackerPolicySnapshot | null,
+): readonly string[] | undefined {
+  return policy === null
+    ? undefined
+    : policy.lanes
+        .filter((lane) => lane.writers.includes("agent") && !lane.terminal)
+        .map((lane) => lane.name);
+}
+
+function issueInFreshAttemptState(
+  issue: Issue,
+  workflow: WorkflowSnapshot,
+  policy: TrackerPolicySnapshot | null = workflowTrackerPolicy(workflow),
+): boolean {
+  return policy === null
+    ? stateIncluded(issue.state, workflow.config.tracker.freshAttemptStates)
+    : trackerLane(policy, issue.state)?.freshAttempt === true;
+}
+
+function issueInTerminalState(
+  issue: Issue,
+  workflow: WorkflowSnapshot,
+  policy: TrackerPolicySnapshot | null = workflowTrackerPolicy(workflow),
+): boolean {
+  return policy === null
+    ? stateIncluded(issue.state, workflow.config.tracker.terminalStates)
+    : trackerLane(policy, issue.state)?.terminal === true;
+}
+
+function generationForIssue(
+  issue: Issue,
+  workflow: WorkflowSnapshot,
+  policy: TrackerPolicySnapshot | null = workflowTrackerPolicy(workflow),
+): string | null {
+  return issueInFreshAttemptState(issue, workflow, policy)
+    ? freshAttemptGeneration(issue)
+    : null;
+}
+
+function runtimeContentReference(
+  reference: RepositoryContentSnapshot | null,
+): RuntimeContentReference | null {
+  return reference === null
+    ? null
+    : {
+        repository_identity: reference.repositoryIdentity,
+        path: reference.path,
+        revision: reference.revision,
+        digest: reference.digest,
+      };
+}
+
+function runtimeGovernanceReferences(
+  authority: PromptAuthorityContext,
+): RuntimeGovernanceReferences {
+  return {
+    doctrine: runtimeContentReference(authority.doctrine),
+    manifest: runtimeContentReference(authority.governanceManifest),
+    tracker_policy: runtimeContentReference(authority.trackerPolicy),
+  };
+}
+
+function sessionPromptAuthority(
+  session: WorkSessionSnapshot,
+): PromptAuthorityContext {
+  return {
+    workSessionId: session.id,
+    doctrine: session.doctrine,
+    governanceManifest: session.configuration?.governanceManifest ?? null,
+    trackerPolicy: session.configuration?.trackerPolicy?.source ?? null,
+  };
+}
+
+function selectedByPolicy(
+  issue: Issue,
+  policy: TrackerPolicySnapshot,
+): boolean {
+  const projection = deriveTrackerPolicyRuntime(policy);
+  const labels = new Set(issue.labels.map(normalizedTrackerValue));
+  return (
+    projection.requiredLabels.every((label) =>
+      labels.has(normalizedTrackerValue(label)),
+    ) &&
+    projection.excludedLabels.every(
+      (label) => !labels.has(normalizedTrackerValue(label)),
+    )
+  );
+}
+
+function policyAllowsAuthoring(
+  issue: Issue,
+  policy: TrackerPolicySnapshot,
+): boolean {
+  const lane = trackerLane(policy, issue.state);
+  return (
+    lane?.active === true &&
+    lane.authoring &&
+    issue.dispatchable &&
+    selectedByPolicy(issue, policy)
+  );
+}
+
+function policyReconciliationStates(
+  policy: TrackerPolicySnapshot,
+): readonly string[] {
+  return policy.lanes
+    .filter(
+      (lane) =>
+        lane.active ||
+        lane.terminal ||
+        Object.values(lane.delivery).some((permitted) => permitted),
+    )
+    .map((lane) => lane.name);
+}
+
+function trackerDeliveryAuthority(
+  session: WorkSessionSnapshot,
+  issue: Issue,
+  observedAt: string,
+): TrackerDeliveryAuthority | null {
+  const policy = session.configuration?.trackerPolicy;
+  const grant = session.configuration?.deliveryGrant;
+  const lane =
+    policy === null || policy === undefined
+      ? null
+      : trackerLane(policy, issue.state);
+  if (
+    session.origin.kind !== "tracker" ||
+    session.origin.issueId !== issue.id ||
+    policy === null ||
+    policy === undefined ||
+    grant === null ||
+    grant === undefined ||
+    lane === null ||
+    !selectedByPolicy(issue, policy)
+  ) {
+    return null;
+  }
+  const profile = new Set(policy.deliveryProfiles[grant.authority]);
+  const permitted = new Set<DeliveryOperation>();
+  for (const [operation, lanePermits] of Object.entries(lane.delivery) as Array<
+    [Exclude<DeliveryOperation, "observeMerge">, boolean]
+  >) {
+    const requiresOpenIssue = [
+      "materialize",
+      "push",
+      "openPullRequest",
+      "mergePullRequest",
+    ].includes(operation);
+    if (
+      lanePermits &&
+      profile.has(operation) &&
+      (issue.dispatchable || !requiresOpenIssue)
+    ) {
+      permitted.add(operation);
+    }
+  }
+  if (
+    profile.has("observeMerge") &&
+    (lane.delivery.observeChecks ||
+      lane.delivery.mergePullRequest ||
+      lane.delivery.releaseRemoteBranch ||
+      lane.delivery.cleanupWorkspace)
+  ) {
+    permitted.add("observeMerge");
+  }
+  const permittedOperations = DELIVERY_OPERATIONS.filter((operation) =>
+    permitted.has(operation),
+  );
+  return {
+    origin: "tracker",
+    issueId: issue.id,
+    state: issue.state,
+    stateVersion: issue.state_version,
+    permittedOperations,
+    permitsDelivery: [
+      "materialize",
+      "push",
+      "openPullRequest",
+      "observeChecks",
+    ].every((operation) => permitted.has(operation as DeliveryOperation)),
+    permitsMerge: permitted.has("mergePullRequest"),
+    permitsCleanup:
+      permitted.has("releaseRemoteBranch") && permitted.has("cleanupWorkspace"),
+    observedAt,
+  };
+}
+
 /**
  * The single mutable authority for claims, workers, retries, and aggregates.
  * Long-running workers report back through a serialized mutation queue.
@@ -267,6 +490,7 @@ export class Orchestrator {
   readonly #agentRunner: AgentExecutionPort;
   readonly #claimed = new Set<string>();
   readonly #clock: OrchestratorClock;
+  readonly #deliveryExecution: DeliveryExecutionPort | null;
   readonly #instanceId: string;
   readonly #logger: Logger;
   readonly #observedTerminalIssueIds = new Set<string>();
@@ -291,6 +515,7 @@ export class Orchestrator {
   constructor(options: OrchestratorOptions) {
     this.#agentRunner = options.agentRunner;
     this.#clock = options.clock ?? systemClock;
+    this.#deliveryExecution = options.deliveryExecution ?? null;
     this.#instanceId = options.instanceId ?? randomUUID();
     this.#logger = options.logger ?? nullLogger;
     this.#stateStore = options.stateStore;
@@ -379,6 +604,7 @@ export class Orchestrator {
       pid: entry.pid,
       turn_count: entry.turnCount,
       work_session_id: entry.workSessionId,
+      governance: runtimeGovernanceReferences(entry.promptAuthority),
       last_event: entry.lastEvent,
       last_message: entry.lastMessage,
       started_at: iso(entry.startedAtMs),
@@ -394,15 +620,29 @@ export class Orchestrator {
     }));
     const localRetries = [...this.#retries.values()]
       .sort((left, right) => left.dueAtMs - right.dueAtMs)
-      .map((entry) => ({
-        issue_id: entry.issue.id,
-        issue_identifier: entry.issue.identifier,
-        issue_url: entry.issue.url,
-        attempt: entry.attempt,
-        due_at: iso(entry.dueAtMs),
-        error: entry.error,
-        kind: entry.kind,
-      }));
+      .map((entry) => {
+        const session = this.#stateStore.getSession(entry.workSessionId);
+        const authority =
+          session === null
+            ? {
+                workSessionId: entry.workSessionId,
+                doctrine: null,
+                governanceManifest: null,
+                trackerPolicy: null,
+              }
+            : sessionPromptAuthority(session);
+        return {
+          issue_id: entry.issue.id,
+          issue_identifier: entry.issue.identifier,
+          issue_url: entry.issue.url,
+          attempt: entry.attempt,
+          due_at: iso(entry.dueAtMs),
+          error: entry.error,
+          kind: entry.kind,
+          work_session_id: entry.workSessionId,
+          governance: runtimeGovernanceReferences(authority),
+        };
+      });
     const localRetrySessionIds = new Set(
       [...this.#retries.values()].map((entry) => entry.workSessionId),
     );
@@ -423,6 +663,10 @@ export class Orchestrator {
         due_at: session.retry.dueAt,
         error: session.retry.error,
         kind: session.retry.kind,
+        work_session_id: session.id,
+        governance: runtimeGovernanceReferences(
+          sessionPromptAuthority(session),
+        ),
       });
     }
     const retrying = [...localRetries, ...durableRetries].sort((left, right) =>
@@ -483,10 +727,9 @@ export class Orchestrator {
 
     let observedIssues: readonly Issue[];
     try {
-      observedIssues = await tracker.fetchIssuesByStates([
-        ...workflow.config.tracker.activeStates,
-        ...workflow.config.tracker.terminalStates,
-      ]);
+      observedIssues = await tracker.fetchIssuesByStates(
+        this.#reconciliationStates(workflow),
+      );
     } catch (error) {
       this.#logger.error("dispatch outcome=skipped reason=tracker_fetch", {
         error: errorMessage(error),
@@ -494,6 +737,7 @@ export class Orchestrator {
       return;
     }
 
+    await this.#reconcileDeliveries(observedIssues, tracker, workflow);
     await this.#reconcileTerminalWorkspaces(observedIssues, workflow);
     if (!dispatchAllowed) return;
 
@@ -507,11 +751,198 @@ export class Orchestrator {
       this.#dispatch(
         issue,
         null,
-        generationForIssue(issue, workflow),
+        generationForIssue(
+          issue,
+          workflow,
+          sessionTrackerPolicy(
+            this.#stateStore.getTrackerSession(
+              workflow.config.tracker.kind,
+              repositoryIdentity(workflow),
+              issue.id,
+            ),
+            workflow,
+          ),
+        ),
         tracker,
         workflow,
       );
     }
+  }
+
+  #reconciliationStates(workflow: WorkflowSnapshot): readonly string[] {
+    const states = new Map<string, string>();
+    const add = (name: string) =>
+      states.set(normalizedTrackerValue(name), name.trim());
+    for (const state of [
+      ...workflow.config.tracker.activeStates,
+      ...workflow.config.tracker.terminalStates,
+    ]) {
+      add(state);
+    }
+    const currentPolicy = workflowTrackerPolicy(workflow);
+    if (currentPolicy !== null) {
+      for (const state of policyReconciliationStates(currentPolicy)) add(state);
+    }
+    for (const session of this.#stateStore.listActiveSessions()) {
+      if (
+        session.origin.kind !== "tracker" ||
+        session.repositoryIdentity !== repositoryIdentity(workflow) ||
+        session.configuration?.trackerPolicy == null
+      ) {
+        continue;
+      }
+      for (const state of policyReconciliationStates(
+        session.configuration.trackerPolicy,
+      )) {
+        add(state);
+      }
+    }
+    return [...states.values()];
+  }
+
+  async #reconcileDeliveries(
+    issues: readonly Issue[],
+    tracker: TrackerAdapter,
+    workflow: WorkflowSnapshot,
+  ): Promise<void> {
+    if (this.#deliveryExecution === null) return;
+    for (const issue of issues) {
+      if (this.#running.has(issue.id)) continue;
+      let session: WorkSessionSnapshot | null;
+      try {
+        session = this.#stateStore.getTrackerSession(
+          workflow.config.tracker.kind,
+          repositoryIdentity(workflow),
+          issue.id,
+        );
+      } catch (error) {
+        this.#logger.error("delivery outcome=deferred reason=state_read", {
+          issue_id: issue.id,
+          error: errorMessage(error),
+        });
+        continue;
+      }
+      if (
+        session === null ||
+        session.status !== "active" ||
+        session.configuration?.deliveryGrant == null
+      ) {
+        continue;
+      }
+      const authority = trackerDeliveryAuthority(
+        session,
+        issue,
+        iso(this.#clock.nowMs()),
+      );
+      if (
+        authority === null ||
+        (authority.permittedOperations.length === 0 &&
+          session.delivery === null)
+      ) {
+        continue;
+      }
+      try {
+        const outcome = await this.#deliveryExecution.reconcile({
+          issue,
+          sessionId: session.id,
+          tracker: authority,
+          workflow,
+        });
+        this.#logger.info(`delivery outcome=${outcome.status}`, {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          work_session_id: session.id,
+        });
+        if (outcome.status === "completed") {
+          await this.#completeTrackerDelivery(outcome.session, issue, tracker);
+        }
+      } catch (error) {
+        this.#logger.error("delivery outcome=deferred reason=reconciliation", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          work_session_id: session.id,
+          error: errorMessage(error),
+        });
+      }
+    }
+  }
+
+  async #completeTrackerDelivery(
+    session: WorkSessionSnapshot,
+    issue: Issue,
+    tracker: TrackerAdapter,
+  ): Promise<void> {
+    const policy = session.configuration?.trackerPolicy;
+    const done =
+      policy === null || policy === undefined
+        ? null
+        : trackerLane(policy, "Done");
+    if (done === null || !done.terminal || !done.writers.includes("agent")) {
+      throw new SymphonyError(
+        "tracker_policy_invalid",
+        "Accepted tracker policy has no agent-writable terminal Done lane",
+      );
+    }
+    const control = tracker.stateControl?.(issue);
+    if (control === undefined) {
+      throw new SymphonyError(
+        "delivery_refused",
+        "Tracker adapter has no typed status-transition control",
+      );
+    }
+    const head = session.delivery?.immutableHeadSha;
+    if (head === null || head === undefined) {
+      throw new SymphonyError(
+        "delivery_refused",
+        "Completed delivery has no immutable head",
+      );
+    }
+    const effect = this.#stateStore.enqueueEffect({
+      sessionId: session.id,
+      controllerGeneration: session.controller.generation,
+      kind: "tracker.delivery_completed",
+      idempotencyKey: `tracker:delivery-completed:${head}`,
+      payload: {
+        issue_id: issue.id,
+        immutable_head_sha: head,
+        target_state: done.name,
+      },
+      now: iso(this.#clock.nowMs()),
+    });
+    if (effect.status === "failed") {
+      throw new StateStoreError(
+        "effect_conflict",
+        `Delivery-completion effect ${effect.id} is terminally failed`,
+      );
+    }
+    let confirmed = issue;
+    const alreadyDone =
+      normalizedTrackerValue(issue.state) === normalizedTrackerValue(done.name);
+    if (effect.status === "applied") {
+      if (!alreadyDone) {
+        throw new SymphonyError(
+          "delivery_refused",
+          `Applied delivery-completion effect ${effect.id} is no longer reflected by tracker truth`,
+        );
+      }
+    } else {
+      confirmed = alreadyDone
+        ? issue
+        : await control.transition(done.name, issue.state_version);
+      this.#stateStore.finishEffect({
+        effectId: effect.id,
+        controllerGeneration: session.controller.generation,
+        status: "applied",
+        result: { state: confirmed.state },
+        now: iso(this.#clock.nowMs()),
+      });
+    }
+    this.#release(issue.id, session.id, session.controller.generation);
+    this.#markSessionTerminal(
+      session.id,
+      session.controller.generation,
+      confirmed,
+    );
   }
 
   async #resumePersistedFreshHandoff(
@@ -583,8 +1014,11 @@ export class Orchestrator {
       await this.#reconcileExpiredRuntimeLeases(workflow);
       const tracker = this.#trackerFactory(workflow);
       const terminalIssues = await tracker.fetchIssuesByStates(
-        workflow.config.tracker.terminalStates,
+        workflowTrackerPolicy(workflow) === null
+          ? workflow.config.tracker.terminalStates
+          : this.#reconciliationStates(workflow),
       );
+      await this.#reconcileDeliveries(terminalIssues, tracker, workflow);
       await this.#reconcileTerminalWorkspaces(
         terminalIssues,
         workflow,
@@ -646,9 +1080,13 @@ export class Orchestrator {
   ): Promise<void> {
     const terminalIssueIds = new Set<string>();
     for (const issue of issues) {
-      if (!stateIncluded(issue.state, workflow.config.tracker.terminalStates)) {
-        continue;
-      }
+      const workSession = this.#stateStore.getTrackerSession(
+        workflow.config.tracker.kind,
+        repositoryIdentity(workflow),
+        issue.id,
+      );
+      const policy = sessionTrackerPolicy(workSession, workflow);
+      if (!issueInTerminalState(issue, workflow, policy)) continue;
       terminalIssueIds.add(issue.id);
       if (
         this.#observedTerminalIssueIds.has(issue.id) ||
@@ -656,11 +1094,6 @@ export class Orchestrator {
       ) {
         continue;
       }
-      const workSession = this.#stateStore.getTrackerSession(
-        workflow.config.tracker.kind,
-        repositoryIdentity(workflow),
-        issue.id,
-      );
       if (
         workSession?.attempts.some(
           (attempt) => attempt.runtimeLease.status === "active",
@@ -672,6 +1105,22 @@ export class Orchestrator {
             issue_id: issue.id,
             issue_identifier: issue.identifier,
             work_session_id: workSession.id,
+          },
+        );
+        continue;
+      }
+      if (
+        workSession?.delivery !== null &&
+        workSession?.delivery !== undefined &&
+        workSession.delivery.phase !== "completed"
+      ) {
+        this.#logger.info(
+          "workspace_cleanup outcome=skipped reason=delivery_pending",
+          {
+            issue_id: issue.id,
+            issue_identifier: issue.identifier,
+            work_session_id: workSession.id,
+            delivery_phase: workSession.delivery.phase,
           },
         );
         continue;
@@ -774,23 +1223,34 @@ export class Orchestrator {
         const byId = new Map(refreshed.map((issue) => [issue.id, issue]));
         for (const entry of entries) {
           const issue = byId.get(entry.issue.id);
+          const policy = sessionTrackerPolicy(
+            this.#stateStore.getSession(entry.workSessionId),
+            workflow,
+          );
           if (issue === undefined) {
             this.#terminate(entry, "released", "issue no longer visible");
-          } else if (
-            stateIncluded(issue.state, workflow.config.tracker.terminalStates)
-          ) {
+          } else if (issueInTerminalState(issue, workflow, policy)) {
             entry.issue = issue;
             this.#terminate(entry, "terminal", `terminal state ${issue.state}`);
           } else if (
-            stateIncluded(issue.state, workflow.config.tracker.activeStates) &&
-            issueRoutable(
-              issue,
-              workflow.config.tracker.requiredLabels,
-              workflow.config.tracker.excludedLabels,
-            )
+            policy === null
+              ? stateIncluded(
+                  issue.state,
+                  workflow.config.tracker.activeStates,
+                ) &&
+                issueRoutable(
+                  issue,
+                  workflow.config.tracker.requiredLabels,
+                  workflow.config.tracker.excludedLabels,
+                )
+              : policyAllowsAuthoring(issue, policy)
           ) {
-            const remainsFresh = issueInFreshAttemptState(issue, workflow);
-            const generation = generationForIssue(issue, workflow);
+            const remainsFresh = issueInFreshAttemptState(
+              issue,
+              workflow,
+              policy,
+            );
+            const generation = generationForIssue(issue, workflow, policy);
             entry.issue = issue;
             if (remainsFresh && generation !== entry.freshAttemptGeneration) {
               this.#terminate(
@@ -823,6 +1283,7 @@ export class Orchestrator {
     let started: StartedAttempt;
     let effectiveAttempt = attempt;
     let effectiveFreshGeneration = freshGeneration;
+    let requiresFreshAttempt = false;
     try {
       const workSession = this.#stateStore.getOrCreateTrackerSession({
         trackerKind: workflow.config.tracker.kind,
@@ -832,7 +1293,7 @@ export class Orchestrator {
         issueUrl: issue.url,
         intent: issue.title,
         controllerId: trackerControllerId(workflow),
-        doctrine: null,
+        doctrine: workflow.config.deployment?.doctrine ?? null,
         configuration:
           workflow.config.deployment?.acceptedConfiguration ?? null,
         now: iso(startedAtMs),
@@ -842,6 +1303,11 @@ export class Orchestrator {
         effectiveFreshGeneration =
           workSession.retry.freshAttemptGeneration ?? freshGeneration;
       }
+      requiresFreshAttempt = issueInFreshAttemptState(
+        issue,
+        workflow,
+        workSession.configuration?.trackerPolicy ?? null,
+      );
       started = this.#stateStore.startAttempt({
         sessionId: workSession.id,
         controllerGeneration: workSession.controller.generation,
@@ -866,6 +1332,7 @@ export class Orchestrator {
     }
 
     const abortController = new AbortController();
+    const promptAuthority = sessionPromptAuthority(started.session);
     const entry: RunningEntry = {
       abortController,
       attemptId: started.attemptId,
@@ -878,6 +1345,8 @@ export class Orchestrator {
       lastMessage: null,
       lastTokens: zeroTokenTotals(),
       pid: null,
+      promptAuthority,
+      requiresFreshAttempt,
       seenTurnIds: new Set(),
       sessionId: null,
       runtimeLeaseToken: started.runtimeLeaseToken,
@@ -902,8 +1371,12 @@ export class Orchestrator {
       fresh_attempt_generation: effectiveFreshGeneration,
     });
 
+    const agentStatusTargets = candidateAgentStatusTargets(
+      started.session.configuration?.trackerPolicy ?? null,
+    );
     const runOptions: AgentRunOptions = {
       attempt: effectiveAttempt,
+      ...(agentStatusTargets === undefined ? {} : { agentStatusTargets }),
       freshAttemptGeneration: effectiveFreshGeneration,
       issue,
       onEvent: (event) =>
@@ -916,6 +1389,8 @@ export class Orchestrator {
         runtimeLeaseToken: entry.runtimeLeaseToken,
         controllerGeneration: entry.controllerGeneration,
       },
+      promptAuthority,
+      requiresFreshAttempt: entry.requiresFreshAttempt,
       signal: abortController.signal,
       tracker,
       workflow,
@@ -1115,16 +1590,7 @@ export class Orchestrator {
       }
       case null:
         if (outcome.error === null) {
-          this.#scheduleRetry(
-            entry.issue,
-            entry.workSessionId,
-            entry.controllerGeneration,
-            1,
-            null,
-            "continuation",
-            entry.freshAttemptGeneration,
-            entry.workflow,
-          );
+          await this.#continueAuthoringOrDeliver(entry);
         } else if (isFreshAttemptRefusal(outcome.error)) {
           const attempt = nextFailureAttempt(entry.attempt);
           const refusalReason = errorMessage(outcome.error);
@@ -1189,6 +1655,75 @@ export class Orchestrator {
         error: outcome.error === null ? null : errorMessage(outcome.error),
       },
     );
+  }
+
+  async #continueAuthoringOrDeliver(entry: RunningEntry): Promise<void> {
+    const initialSession = this.#stateStore.getSession(entry.workSessionId);
+    if (sessionTrackerPolicy(initialSession, entry.workflow) === null) {
+      this.#scheduleRetry(
+        entry.issue,
+        entry.workSessionId,
+        entry.controllerGeneration,
+        1,
+        null,
+        "continuation",
+        entry.freshAttemptGeneration,
+        entry.workflow,
+      );
+      return;
+    }
+    let refreshed: readonly Issue[];
+    try {
+      refreshed = await entry.tracker.fetchIssuesByIds([entry.issue.id]);
+    } catch (error) {
+      this.#logger.warn(
+        "worker_completion outcome=deferred reason=tracker_refresh",
+        {
+          issue_id: entry.issue.id,
+          error: errorMessage(error),
+        },
+      );
+      this.#scheduleRetry(
+        entry.issue,
+        entry.workSessionId,
+        entry.controllerGeneration,
+        1,
+        null,
+        "continuation",
+        entry.freshAttemptGeneration,
+        entry.workflow,
+      );
+      return;
+    }
+    const issue = refreshed.find(
+      (candidate) => candidate.id === entry.issue.id,
+    );
+    if (issue === undefined) {
+      this.#release(
+        entry.issue.id,
+        entry.workSessionId,
+        entry.controllerGeneration,
+      );
+      return;
+    }
+    entry.issue = issue;
+    const session = this.#stateStore.getSession(entry.workSessionId);
+    const policy = sessionTrackerPolicy(session, entry.workflow);
+    if (policy === null || policyAllowsAuthoring(issue, policy)) {
+      this.#scheduleRetry(
+        issue,
+        entry.workSessionId,
+        entry.controllerGeneration,
+        1,
+        null,
+        "continuation",
+        entry.freshAttemptGeneration,
+        entry.workflow,
+      );
+      return;
+    }
+    this.#release(issue.id, entry.workSessionId, entry.controllerGeneration);
+    await this.#reconcileDeliveries([issue], entry.tracker, entry.workflow);
   }
 
   #finishDurableAttempt(entry: RunningEntry, error: unknown | null): boolean {
@@ -1356,7 +1891,9 @@ export class Orchestrator {
       this.#release(issueId, retry.workSessionId, retry.controllerGeneration);
       return;
     }
-    if (stateIncluded(issue.state, workflow.config.tracker.terminalStates)) {
+    const retrySession = this.#stateStore.getSession(retry.workSessionId);
+    const retryPolicy = sessionTrackerPolicy(retrySession, workflow);
+    if (issueInTerminalState(issue, workflow, retryPolicy)) {
       if (
         await this.#cleanupWorkspace(
           issue,
@@ -1377,13 +1914,18 @@ export class Orchestrator {
       this.#release(issueId, retry.workSessionId, retry.controllerGeneration);
       return;
     }
-    if (!issueEligibleByConfig(issue, workflow.config)) {
+    if (
+      retryPolicy === null
+        ? !issueEligibleByConfig(issue, workflow.config)
+        : !policyAllowsAuthoring(issue, retryPolicy)
+    ) {
       this.#release(issueId, retry.workSessionId, retry.controllerGeneration);
+      await this.#reconcileDeliveries([issue], tracker, workflow);
       return;
     }
-    const remainsFresh = issueInFreshAttemptState(issue, workflow);
+    const remainsFresh = issueInFreshAttemptState(issue, workflow, retryPolicy);
     const generation = remainsFresh
-      ? generationForIssue(issue, workflow)
+      ? generationForIssue(issue, workflow, retryPolicy)
       : retry.freshAttemptGeneration;
     if (remainsFresh && generation !== retry.freshAttemptGeneration) {
       this.#release(issueId, retry.workSessionId, retry.controllerGeneration);
@@ -1461,7 +2003,13 @@ export class Orchestrator {
     reason: string,
     generation: string | null,
   ): Promise<void> {
-    const failureState = workflow.config.tracker.freshAttemptFailureState;
+    const policy = sessionTrackerPolicy(
+      this.#stateStore.getSession(workSessionId),
+      workflow,
+    );
+    const failureState =
+      policy?.retry.freshAttemptFailureLane ??
+      workflow.config.tracker.freshAttemptFailureState;
     if (failureState === null) {
       throw new Error("Fresh-attempt failure state is not configured");
     }
@@ -1510,8 +2058,16 @@ export class Orchestrator {
   }
 
   #shouldDispatch(issue: Issue, workflow: WorkflowSnapshot): boolean {
+    const session = this.#stateStore.getTrackerSession(
+      workflow.config.tracker.kind,
+      repositoryIdentity(workflow),
+      issue.id,
+    );
+    const policy = sessionTrackerPolicy(session, workflow);
     return (
-      issueEligibleByConfig(issue, workflow.config) &&
+      (policy === null
+        ? issueEligibleByConfig(issue, workflow.config)
+        : policyAllowsAuthoring(issue, policy)) &&
       !this.#running.has(issue.id) &&
       !this.#claimed.has(issue.id)
     );

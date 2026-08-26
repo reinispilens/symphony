@@ -1,4 +1,5 @@
 import type { JsonObject } from "../shared/json.js";
+import type { TrackerPolicySnapshot } from "../governance/model.js";
 
 export const WORK_SESSION_SCHEMA_VERSION = 2;
 
@@ -65,12 +66,35 @@ export interface DeliveryGrantSnapshot {
   readonly requiredChecks: readonly string[];
 }
 
+/**
+ * Operator-owned trust anchor for admitting one protected GitHub Actions proof.
+ * The product names the required check; the deployment proves which reusable
+ * workflow is allowed to establish that check's authoritative result.
+ */
+export interface ProtectedProofAuthoritySnapshot {
+  readonly kind: "github-actions-reusable-workflow-v1";
+  readonly requiredCheck: string;
+  readonly eventName: "pull_request_target";
+  readonly callerWorkflowPath: string;
+  readonly controlWorkflow: {
+    readonly repositoryIdentity: string;
+    readonly path: string;
+    readonly revision: string;
+  };
+}
+
 export interface AcceptedConfigurationSnapshot {
   readonly productProfile: RepositoryContentSnapshot;
   readonly authoringContext: AuthoringContextSnapshot;
   readonly deploymentBinding: DeploymentBindingSnapshot;
+  /** Null only for historical and deployment-binding v1/v2 compatibility records. */
+  readonly governanceManifest: RepositoryContentSnapshot | null;
+  /** Null only for historical and deployment-binding v1/v2 compatibility records. */
+  readonly trackerPolicy: TrackerPolicySnapshot | null;
   /** Null only for the version-1 managed-profile compatibility path. */
   readonly deliveryGrant: DeliveryGrantSnapshot | null;
+  /** Null only when delivery is absent or for historical binding v1/v2 records. */
+  readonly proofAuthority: ProtectedProofAuthoritySnapshot | null;
 }
 
 export interface ControllerAssignment {

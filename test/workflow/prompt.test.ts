@@ -19,6 +19,33 @@ describe("renderPrompt", () => {
     );
   });
 
+  it("exposes immutable governance references without copying doctrine prose", async () => {
+    const reference = {
+      repositoryIdentity: "reinispilens/.github",
+      path: "agent-system/tracker-policy.json",
+      revision: "a".repeat(40),
+      digest: `sha256:${"b".repeat(64)}`,
+    };
+    const rendered = await renderPrompt(
+      "{{ work_session.id }} {{ governance.tracker_policy.path }}@{{ governance.tracker_policy.revision }}",
+      issue(),
+      null,
+      {
+        workSessionId: "session-1",
+        doctrine: { ...reference, path: "agent-system/golden-principles.md" },
+        governanceManifest: {
+          ...reference,
+          path: "agent-system/accepted-governance.json",
+        },
+        trackerPolicy: reference,
+      },
+    );
+    expect(rendered).toBe(
+      `session-1 agent-system/tracker-policy.json@${"a".repeat(40)}`,
+    );
+    expect(rendered).not.toContain("principle");
+  });
+
   it("fails on unknown variables", async () => {
     await expect(
       renderPrompt("{{ missing.value }}", issue(), null),

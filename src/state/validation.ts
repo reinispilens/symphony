@@ -1,5 +1,7 @@
 import { isRecord } from "../shared/json.js";
 import nodePath from "node:path";
+import { parseTrackerPolicy } from "../governance/tracker-policy.js";
+import type { RepositoryContentSnapshot } from "./model.js";
 import {
   WORK_SESSION_SCHEMA_VERSION,
   type AcceptedConfigurationSnapshot,
@@ -202,6 +204,43 @@ function parseDoctrine(value: unknown): DoctrineSnapshot | null {
   };
 }
 
+function parseContentReference(
+  value: unknown,
+  path: string,
+): RepositoryContentSnapshot {
+  const source = record(value, path);
+  return {
+    repositoryIdentity: nonEmptyString(
+      source["repositoryIdentity"],
+      `${path}.repositoryIdentity`,
+    ),
+    path: nonEmptyString(source["path"], `${path}.path`),
+    revision: nonEmptyString(source["revision"], `${path}.revision`),
+    digest: nonEmptyString(source["digest"], `${path}.digest`),
+  };
+}
+
+function parseTrackerPolicySnapshot(value: unknown) {
+  if (value === undefined || value === null) return null;
+  const snapshot = record(value, "document.configuration.trackerPolicy");
+  const source = parseContentReference(
+    snapshot["source"],
+    "document.configuration.trackerPolicy.source",
+  );
+  const policy = Object.fromEntries(
+    Object.entries(snapshot).filter(([key]) => key !== "source"),
+  );
+  try {
+    return parseTrackerPolicy(Buffer.from(JSON.stringify(policy)), source);
+  } catch (error) {
+    throw new StateStoreError(
+      "state_corrupt",
+      "Symphony state document.configuration.trackerPolicy must contain a valid accepted tracker policy",
+      { cause: error },
+    );
+  }
+}
+
 function parseConfiguration(
   value: unknown,
 ): AcceptedConfigurationSnapshot | null {
@@ -219,6 +258,15 @@ function parseConfiguration(
     source["deploymentBinding"],
     "document.configuration.deploymentBinding",
   );
+  const governanceManifest =
+    source["governanceManifest"] === undefined ||
+    source["governanceManifest"] === null
+      ? null
+      : parseContentReference(
+          source["governanceManifest"],
+          "document.configuration.governanceManifest",
+        );
+  const trackerPolicy = parseTrackerPolicySnapshot(source["trackerPolicy"]);
   const deliveryValue = source["deliveryGrant"];
   const delivery =
     deliveryValue === undefined || deliveryValue === null
@@ -230,6 +278,18 @@ function parseConfiguration(
       : record(
           delivery["governingPolicy"],
           "document.configuration.deliveryGrant.governingPolicy",
+        );
+  const proofValue = source["proofAuthority"];
+  const proofAuthority =
+    proofValue === undefined || proofValue === null
+      ? null
+      : record(proofValue, "document.configuration.proofAuthority");
+  const controlWorkflow =
+    proofAuthority === null
+      ? null
+      : record(
+          proofAuthority["controlWorkflow"],
+          "document.configuration.proofAuthority.controlWorkflow",
         );
   return {
     productProfile: {
@@ -293,6 +353,8 @@ function parseConfiguration(
         "document.configuration.deploymentBinding.digest",
       ),
     },
+    governanceManifest,
+    trackerPolicy,
     deliveryGrant:
       delivery === null || governingPolicy === null
         ? null
@@ -329,6 +391,43 @@ function parseConfiguration(
                 `document.configuration.deliveryGrant.requiredChecks[${index}]`,
               ),
             ),
+          },
+    proofAuthority:
+      proofAuthority === null || controlWorkflow === null
+        ? null
+        : {
+            kind: oneOf(
+              proofAuthority["kind"],
+              "document.configuration.proofAuthority.kind",
+              ["github-actions-reusable-workflow-v1"] as const,
+            ),
+            requiredCheck: nonEmptyString(
+              proofAuthority["requiredCheck"],
+              "document.configuration.proofAuthority.requiredCheck",
+            ),
+            eventName: oneOf(
+              proofAuthority["eventName"],
+              "document.configuration.proofAuthority.eventName",
+              ["pull_request_target"] as const,
+            ),
+            callerWorkflowPath: nonEmptyString(
+              proofAuthority["callerWorkflowPath"],
+              "document.configuration.proofAuthority.callerWorkflowPath",
+            ),
+            controlWorkflow: {
+              repositoryIdentity: nonEmptyString(
+                controlWorkflow["repositoryIdentity"],
+                "document.configuration.proofAuthority.controlWorkflow.repositoryIdentity",
+              ),
+              path: nonEmptyString(
+                controlWorkflow["path"],
+                "document.configuration.proofAuthority.controlWorkflow.path",
+              ),
+              revision: nonEmptyString(
+                controlWorkflow["revision"],
+                "document.configuration.proofAuthority.controlWorkflow.revision",
+              ),
+            },
           },
   };
 }
@@ -1021,7 +1120,10 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
       productProfile,
       authoringContext,
       deploymentBinding,
+      governanceManifest,
+      trackerPolicy,
       deliveryGrant,
+      proofAuthority,
     } = document.configuration;
     if (
       productProfile.repositoryIdentity !== document.repositoryIdentity ||
@@ -1054,6 +1156,62 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
       deploymentBinding.digest,
       "document.configuration.deploymentBinding.digest",
     );
+    if ((governanceManifest === null) !== (trackerPolicy === null)) {
+      corrupt(
+        "document.configuration",
+        "must pin the governance manifest and tracker policy together",
+      );
+    }
+    if (governanceManifest !== null && trackerPolicy !== null) {
+      for (const [content, location] of [
+        [governanceManifest, "governanceManifest"],
+        [trackerPolicy.source, "trackerPolicy.source"],
+      ] as const) {
+        if (!content.repositoryIdentity.toLowerCase().endsWith("/.github")) {
+          corrupt(
+            `document.configuration.${location}.repositoryIdentity`,
+            "must identify an owner or organization .github repository",
+          );
+        }
+        assertRepositoryRelativePath(
+          content.path,
+          `document.configuration.${location}.path`,
+        );
+        assertGitSha(
+          content.revision,
+          `document.configuration.${location}.revision`,
+        );
+        assertSha256(
+          content.digest,
+          `document.configuration.${location}.digest`,
+        );
+      }
+      if (
+        governanceManifest.repositoryIdentity.toLowerCase() !==
+        trackerPolicy.source.repositoryIdentity.toLowerCase()
+      ) {
+        corrupt(
+          "document.configuration.trackerPolicy.source.repositoryIdentity",
+          "must match the governance-manifest repository",
+        );
+      }
+      if (document.doctrine === null) {
+        corrupt(
+          "document.doctrine",
+          "must be pinned when accepted governance is configured",
+        );
+      }
+      if (
+        document.doctrine.repositoryIdentity.toLowerCase() !==
+          trackerPolicy.source.repositoryIdentity.toLowerCase() ||
+        document.doctrine.revision !== trackerPolicy.source.revision
+      ) {
+        corrupt(
+          "document.doctrine",
+          "must come from the tracker policy's accepted repository revision",
+        );
+      }
+    }
     if (deliveryGrant !== null) {
       const policy = deliveryGrant.governingPolicy;
       if (!policy.repositoryIdentity.toLowerCase().endsWith("/.github")) {
@@ -1074,6 +1232,19 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
         policy.digest,
         "document.configuration.deliveryGrant.governingPolicy.digest",
       );
+      if (
+        trackerPolicy !== null &&
+        (policy.repositoryIdentity.toLowerCase() !==
+          trackerPolicy.source.repositoryIdentity.toLowerCase() ||
+          policy.path !== trackerPolicy.source.path ||
+          policy.revision !== trackerPolicy.source.revision ||
+          policy.digest !== trackerPolicy.source.digest)
+      ) {
+        corrupt(
+          "document.configuration.deliveryGrant.governingPolicy",
+          "must exactly match the accepted tracker-policy source",
+        );
+      }
       if (deliveryGrant.requiredChecks.length === 0) {
         corrupt(
           "document.configuration.deliveryGrant.requiredChecks",
@@ -1094,6 +1265,54 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
           "must be ordered by check name",
         );
       }
+    }
+    if (proofAuthority !== null) {
+      if (deliveryGrant === null) {
+        corrupt(
+          "document.configuration.proofAuthority",
+          "requires a product delivery grant",
+        );
+      }
+      if (
+        !deliveryGrant.requiredChecks.includes(proofAuthority.requiredCheck)
+      ) {
+        corrupt(
+          "document.configuration.proofAuthority.requiredCheck",
+          "must identify one check in the product delivery grant",
+        );
+      }
+      if (
+        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(
+          proofAuthority.controlWorkflow.repositoryIdentity,
+        )
+      ) {
+        corrupt(
+          "document.configuration.proofAuthority.controlWorkflow.repositoryIdentity",
+          "must use owner/repository form",
+        );
+      }
+      for (const [workflowPath, location] of [
+        [proofAuthority.callerWorkflowPath, "callerWorkflowPath"],
+        [proofAuthority.controlWorkflow.path, "controlWorkflow.path"],
+      ] as const) {
+        assertRepositoryRelativePath(
+          workflowPath,
+          `document.configuration.proofAuthority.${location}`,
+        );
+        if (
+          !workflowPath.startsWith(".github/workflows/") ||
+          (!workflowPath.endsWith(".yml") && !workflowPath.endsWith(".yaml"))
+        ) {
+          corrupt(
+            `document.configuration.proofAuthority.${location}`,
+            "must identify a YAML file under .github/workflows/",
+          );
+        }
+      }
+      assertGitSha(
+        proofAuthority.controlWorkflow.revision,
+        "document.configuration.proofAuthority.controlWorkflow.revision",
+      );
     }
     assertUnique(
       authoringContext.entries.map((entry) => entry.path),

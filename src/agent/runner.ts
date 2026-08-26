@@ -15,6 +15,7 @@ import type {
 import type { TrackerAdapter } from "../tracker/adapter.js";
 import { issueRoutable, normalizedTrackerValue } from "../tracker/routing.js";
 import { renderPrompt } from "../workflow/prompt.js";
+import type { PromptAuthorityContext } from "../workflow/prompt.js";
 import type { WorkflowSnapshot } from "../workflow/store.js";
 import { WorkspaceManager } from "../workspace/manager.js";
 import {
@@ -45,6 +46,11 @@ export interface AgentRunOptions {
   readonly attempt: number | null;
   readonly freshAttemptGeneration: string | null;
   readonly issue: Issue;
+  /** Managed-session policy targets; absent only for compatibility runs. */
+  readonly agentStatusTargets?: readonly string[];
+  readonly promptAuthority?: PromptAuthorityContext;
+  /** Pinned WorkSession policy decision; defaults to legacy workflow semantics. */
+  readonly requiresFreshAttempt?: boolean;
   readonly onEvent?: AgentEventHandler;
   readonly onWorkspace?: (workspace: Workspace) => void | Promise<void>;
   readonly repositoryAuthority?: RepositoryAttemptAuthority;
@@ -180,10 +186,9 @@ export class AgentRunner {
 
     try {
       throwIfAborted(options.signal);
-      const requiresFreshAttempt = stateIncluded(
-        options.issue.state,
-        config.tracker.freshAttemptStates,
-      );
+      const requiresFreshAttempt =
+        options.requiresFreshAttempt ??
+        stateIncluded(options.issue.state, config.tracker.freshAttemptStates);
       if (requiresFreshAttempt) {
         if (options.freshAttemptGeneration === null) {
           throw new AgentError(
@@ -291,9 +296,15 @@ export class AgentRunner {
         options.workflow.definition.promptTemplate,
         options.issue,
         options.attempt,
+        options.promptAuthority ?? null,
       );
       const toolRuntime =
-        options.tracker.agentToolRuntime?.(options.issue) ?? null;
+        options.tracker.agentToolRuntime?.(options.issue, {
+          freshAttempt: requiresFreshAttempt,
+          ...(options.agentStatusTargets === undefined
+            ? {}
+            : { statusTargets: options.agentStatusTargets }),
+        }) ?? null;
       session = await this.#sessionFactory({
         command: managedSandbox?.command ?? config.codex.command,
         cwd: workspace.path,

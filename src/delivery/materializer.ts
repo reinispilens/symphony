@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import {
@@ -9,6 +9,7 @@ import {
   readdir,
   readlink,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -434,10 +435,9 @@ async function snapshotWorkspace(
     if (entry.kind !== "regular") {
       refuse(`Git attributes must not be a symlink: ${entry.path}`);
     }
-    const contents = await readFile(
-      path.join(workspacePath, entry.path),
-      "utf8",
-    );
+    const contents = (
+      await git(executable, workspacePath, ["cat-file", "blob", entry.blobSha])
+    ).toString("utf8");
     if (
       contents
         .split(/\r?\n/u)
@@ -708,8 +708,24 @@ async function acquireFence(
       }
     }
     if (live) refuse(`Workspace already holds a live materialization fence`);
-    await rm(lockPath, { recursive: true });
-    await mkdir(lockPath, { mode: 0o700 });
+    const stalePath = `${lockPath}.stale-${randomUUID()}`;
+    try {
+      await rename(lockPath, stalePath);
+    } catch (renameError) {
+      if ((renameError as NodeJS.ErrnoException).code === "ENOENT") {
+        refuse("Materialization fence changed during stale-owner recovery");
+      }
+      throw renameError;
+    }
+    await rm(stalePath, { recursive: true });
+    try {
+      await mkdir(lockPath, { mode: 0o700 });
+    } catch (claimError) {
+      if ((claimError as NodeJS.ErrnoException).code === "EEXIST") {
+        refuse("Another process acquired the materialization fence");
+      }
+      throw claimError;
+    }
   }
   await writeFile(
     ownerPath,
@@ -720,6 +736,25 @@ async function acquireFence(
     const resolvedLock = await realpath(lockPath);
     if (path.dirname(resolvedLock) !== lockRoot) {
       refuse("Materialization fence escaped its trusted lock root");
+    }
+    let owner: {
+      bootId?: unknown;
+      materializationId?: unknown;
+      pid?: unknown;
+      startTicks?: unknown;
+    };
+    try {
+      owner = JSON.parse(await readFile(ownerPath, "utf8")) as typeof owner;
+    } catch (error) {
+      refuse("Materialization fence ownership became ambiguous", error);
+    }
+    if (
+      owner.bootId !== identity.bootId ||
+      owner.materializationId !== materializationId ||
+      owner.pid !== identity.pid ||
+      owner.startTicks !== identity.startTicks
+    ) {
+      refuse("Materialization fence ownership changed before release");
     }
     await rm(lockPath, { recursive: true });
   };

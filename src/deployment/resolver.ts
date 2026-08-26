@@ -7,6 +7,8 @@ import { BlockList, isIP } from "node:net";
 import { TextDecoder } from "node:util";
 
 import { SymphonyError } from "../errors.js";
+import { resolveAcceptedGovernance } from "../governance/resolver.js";
+import { deriveTrackerPolicyRuntime } from "../governance/tracker-policy.js";
 import {
   trustedGitArguments,
   trustedGitEnvironment,
@@ -23,9 +25,14 @@ import type { WorkflowDefinition } from "../workflow/definition.js";
 import type { WorkflowSnapshot } from "../workflow/store.js";
 import {
   DEPLOYMENT_BINDING_SCHEMA_VERSION,
+  DELIVERY_DEPLOYMENT_BINDING_SCHEMA_VERSION,
   LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION,
   LEGACY_REPOSITORY_PROFILE_SCHEMA_VERSION,
   REPOSITORY_PROFILE_SCHEMA_VERSION,
+  type DeliveryProviderBinding,
+  type DeploymentBindingDocument,
+  type GovernanceBinding,
+  type LegacyTrackerBinding,
   type NormalizedDeploymentBindingDocument,
   type RepositoryProfileDocument,
   type ResolvedDeployment,
@@ -501,9 +508,7 @@ function parseRepositoryProfile(bytes: Buffer): RepositoryProfileDocument {
   };
 }
 
-function parseTracker(
-  value: unknown,
-): NormalizedDeploymentBindingDocument["tracker"] {
+function parseTracker(value: unknown): LegacyTrackerBinding {
   const source = strictObject(
     value,
     "binding.tracker",
@@ -565,6 +570,182 @@ function parseTracker(
   };
 }
 
+function parseThinTracker(
+  value: unknown,
+): Extract<
+  DeploymentBindingDocument,
+  { readonly schemaVersion: 3 }
+>["tracker"] {
+  const source = strictObject(
+    value,
+    "binding.tracker",
+    ["kind", "provider"],
+    "binding",
+  );
+  let provider: JsonObject;
+  try {
+    provider = toJsonObject(source["provider"], "binding.tracker.provider");
+  } catch (error) {
+    throw new SymphonyError(
+      "deployment_binding_invalid",
+      "binding.tracker.provider must be a JSON object",
+      { cause: error },
+    );
+  }
+  return {
+    kind: nonEmptyString(source["kind"], "binding.tracker.kind", "binding"),
+    provider,
+  };
+}
+
+function parseGovernance(value: unknown): GovernanceBinding {
+  const source = strictObject(
+    value,
+    "binding.governance",
+    ["repositoryIdentity", "sourceRoot", "manifest"],
+    "binding",
+  );
+  const manifest = strictObject(
+    source["manifest"],
+    "binding.governance.manifest",
+    ["path", "revision", "digest"],
+    "binding",
+  );
+  const identity = repositoryIdentity(
+    source["repositoryIdentity"],
+    "binding.governance.repositoryIdentity",
+    "binding",
+  );
+  if (!identity.toLowerCase().endsWith("/.github")) {
+    invalid(
+      "binding",
+      "binding.governance.repositoryIdentity",
+      "must identify an owner or organization .github repository",
+    );
+  }
+  const revision = nonEmptyString(
+    manifest["revision"],
+    "binding.governance.manifest.revision",
+    "binding",
+  );
+  if (!/^[0-9a-f]{40}$/u.test(revision)) {
+    invalid(
+      "binding",
+      "binding.governance.manifest.revision",
+      "must be a full lowercase Git SHA-1",
+    );
+  }
+  return {
+    repositoryIdentity: identity,
+    sourceRoot: absolutePath(
+      source["sourceRoot"],
+      "binding.governance.sourceRoot",
+    ),
+    manifest: {
+      path: repositoryPath(
+        manifest["path"],
+        "binding.governance.manifest.path",
+        "binding",
+      ),
+      revision,
+      digest: strictDigest(
+        manifest["digest"],
+        "binding.governance.manifest.digest",
+        "binding",
+      ),
+    },
+  };
+}
+
+function githubWorkflowPath(value: unknown, location: string): string {
+  const result = repositoryPath(value, location, "binding");
+  if (
+    !result.startsWith(".github/workflows/") ||
+    (!result.endsWith(".yml") && !result.endsWith(".yaml"))
+  ) {
+    invalid(
+      "binding",
+      location,
+      "must identify a YAML file under .github/workflows/",
+    );
+  }
+  return result;
+}
+
+function parseProofAuthority(
+  value: unknown,
+): NonNullable<DeliveryProviderBinding["proofAuthority"]> {
+  const source = strictObject(
+    value,
+    "binding.deliveryProvider.proofAuthority",
+    [
+      "kind",
+      "requiredCheck",
+      "eventName",
+      "callerWorkflowPath",
+      "controlWorkflow",
+    ],
+    "binding",
+  );
+  if (source["kind"] !== "github-actions-reusable-workflow-v1") {
+    invalid(
+      "binding",
+      "binding.deliveryProvider.proofAuthority.kind",
+      "must be 'github-actions-reusable-workflow-v1'",
+    );
+  }
+  if (source["eventName"] !== "pull_request_target") {
+    invalid(
+      "binding",
+      "binding.deliveryProvider.proofAuthority.eventName",
+      "must be 'pull_request_target'",
+    );
+  }
+  const control = strictObject(
+    source["controlWorkflow"],
+    "binding.deliveryProvider.proofAuthority.controlWorkflow",
+    ["repositoryIdentity", "path", "revision"],
+    "binding",
+  );
+  const revision = nonEmptyString(
+    control["revision"],
+    "binding.deliveryProvider.proofAuthority.controlWorkflow.revision",
+    "binding",
+  );
+  if (!/^[0-9a-f]{40}$/u.test(revision)) {
+    invalid(
+      "binding",
+      "binding.deliveryProvider.proofAuthority.controlWorkflow.revision",
+      "must be a full lowercase Git SHA-1",
+    );
+  }
+  return {
+    kind: "github-actions-reusable-workflow-v1",
+    requiredCheck: nonEmptyString(
+      source["requiredCheck"],
+      "binding.deliveryProvider.proofAuthority.requiredCheck",
+      "binding",
+    ),
+    eventName: "pull_request_target",
+    callerWorkflowPath: githubWorkflowPath(
+      source["callerWorkflowPath"],
+      "binding.deliveryProvider.proofAuthority.callerWorkflowPath",
+    ),
+    controlWorkflow: {
+      repositoryIdentity: repositoryIdentity(
+        control["repositoryIdentity"],
+        "binding.deliveryProvider.proofAuthority.controlWorkflow.repositoryIdentity",
+        "binding",
+      ),
+      path: githubWorkflowPath(
+        control["path"],
+        "binding.deliveryProvider.proofAuthority.controlWorkflow.path",
+      ),
+      revision,
+    },
+  };
+}
+
 function numberMap(
   value: unknown,
   location: string,
@@ -584,9 +765,7 @@ function numberMap(
   return result;
 }
 
-function parseDeploymentBinding(
-  bytes: Buffer,
-): NormalizedDeploymentBindingDocument {
+function parseDeploymentBinding(bytes: Buffer): DeploymentBindingDocument {
   const decoded = parseJson(bytes, "deployment binding", "binding");
   if (!isRecord(decoded)) {
     invalid("binding", "binding", "must be an object");
@@ -594,12 +773,13 @@ function parseDeploymentBinding(
   const schemaVersion = decoded["schemaVersion"];
   if (
     schemaVersion !== LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION &&
+    schemaVersion !== DELIVERY_DEPLOYMENT_BINDING_SCHEMA_VERSION &&
     schemaVersion !== DEPLOYMENT_BINDING_SCHEMA_VERSION
   ) {
     invalid(
       "binding",
       "binding.schemaVersion",
-      `must equal ${LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION} or ${DEPLOYMENT_BINDING_SCHEMA_VERSION}`,
+      `must equal ${LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION}, ${DELIVERY_DEPLOYMENT_BINDING_SCHEMA_VERSION}, or ${DEPLOYMENT_BINDING_SCHEMA_VERSION}`,
     );
   }
   const source = strictObject(
@@ -613,8 +793,11 @@ function parseDeploymentBinding(
       "workspaceRoot",
       "branchPrefix",
       "gitExecutable",
-      ...(schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
+      ...(schemaVersion !== LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION
         ? ["deliveryProvider"]
+        : []),
+      ...(schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
+        ? ["governance"]
         : []),
       "tracker",
       "polling",
@@ -722,7 +905,7 @@ function parseDeploymentBinding(
     );
   }
   const deliveryProviderValue =
-    schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
+    schemaVersion !== LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION
       ? source["deliveryProvider"]
       : null;
   const deliveryProvider =
@@ -736,6 +919,9 @@ function parseDeploymentBinding(
             "executable",
             "timeoutMs",
             "secretEnvironmentNames",
+            ...(schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
+              ? ["proofAuthority"]
+              : []),
           ],
           "binding",
         );
@@ -808,23 +994,36 @@ function parseDeploymentBinding(
       source["gitExecutable"],
       "binding.gitExecutable",
     ),
-    deliveryProvider:
-      deliveryProvider === null
-        ? null
-        : {
-            protocolVersion: 1,
-            executable: absolutePath(
-              deliveryProvider["executable"],
-              "binding.deliveryProvider.executable",
-            ),
-            timeoutMs: integer(
-              deliveryProvider["timeoutMs"],
-              "binding.deliveryProvider.timeoutMs",
-              1,
-            ),
-            secretEnvironmentNames: deliverySecretNames,
-          },
-    tracker: parseTracker(source["tracker"]),
+    ...(schemaVersion === LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION
+      ? {}
+      : {
+          deliveryProvider:
+            deliveryProvider === null
+              ? null
+              : {
+                  protocolVersion: 1 as const,
+                  executable: absolutePath(
+                    deliveryProvider["executable"],
+                    "binding.deliveryProvider.executable",
+                  ),
+                  timeoutMs: integer(
+                    deliveryProvider["timeoutMs"],
+                    "binding.deliveryProvider.timeoutMs",
+                    1,
+                  ),
+                  secretEnvironmentNames: deliverySecretNames,
+                  proofAuthority:
+                    schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
+                      ? parseProofAuthority(deliveryProvider["proofAuthority"])
+                      : null,
+                },
+        }),
+    ...(schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
+      ? {
+          governance: parseGovernance(source["governance"]),
+          tracker: parseThinTracker(source["tracker"]),
+        }
+      : { tracker: parseTracker(source["tracker"]) }),
     polling: {
       intervalMs: integer(
         polling["intervalMs"],
@@ -928,7 +1127,7 @@ function parseDeploymentBinding(
         ),
       },
     },
-  };
+  } as DeploymentBindingDocument;
 }
 
 function command(
@@ -1293,13 +1492,13 @@ export async function resolveDeploymentBinding(
     "deployment binding",
   );
   const bindingBytes = await readFile(bindingPath);
-  const binding = parseDeploymentBinding(bindingBytes);
+  const parsedBinding = parseDeploymentBinding(bindingBytes);
   const bindingDigest = sha256(bindingBytes);
   const gitExecutable = await executable(
-    binding.gitExecutable,
+    parsedBinding.gitExecutable,
     "deployment Git executable",
   );
-  if (gitExecutable !== binding.gitExecutable) {
+  if (gitExecutable !== parsedBinding.gitExecutable) {
     refuse(
       "Deployment Git executable must contain no symbolic-link components",
     );
@@ -1307,7 +1506,7 @@ export async function resolveDeploymentBinding(
 
   let sourceRoot: string;
   try {
-    sourceRoot = await realpath(binding.productProfile.sourceRoot);
+    sourceRoot = await realpath(parsedBinding.productProfile.sourceRoot);
     const entry = await lstat(sourceRoot);
     if (!entry.isDirectory() || entry.isSymbolicLink()) {
       refuse("Deployment source root must be a real directory");
@@ -1318,8 +1517,8 @@ export async function resolveDeploymentBinding(
   }
   const governedRoots = {
     sourceRoot,
-    stateRoot: binding.stateRoot,
-    workspaceRoot: binding.workspaceRoot,
+    stateRoot: parsedBinding.stateRoot,
+    workspaceRoot: parsedBinding.workspaceRoot,
   };
   assertExecutableOutsideGovernedRoots("Git", gitExecutable, governedRoots);
   const actualRoot = path.resolve(
@@ -1332,8 +1531,8 @@ export async function resolveDeploymentBinding(
     refuse("Deployment binding must be outside the product source root");
   }
   for (const [label, root] of [
-    ["state", binding.stateRoot],
-    ["workspace", binding.workspaceRoot],
+    ["state", parsedBinding.stateRoot],
+    ["workspace", parsedBinding.workspaceRoot],
   ] as const) {
     if (insideOrEqual(sourceRoot, root) || insideOrEqual(root, sourceRoot)) {
       refuse(`Deployment ${label} root must be disjoint from product source`);
@@ -1343,11 +1542,42 @@ export async function resolveDeploymentBinding(
     }
   }
   if (
-    insideOrEqual(binding.stateRoot, binding.workspaceRoot) ||
-    insideOrEqual(binding.workspaceRoot, binding.stateRoot)
+    insideOrEqual(parsedBinding.stateRoot, parsedBinding.workspaceRoot) ||
+    insideOrEqual(parsedBinding.workspaceRoot, parsedBinding.stateRoot)
   ) {
     refuse("Deployment state and workspace roots must be disjoint");
   }
+
+  const governance =
+    parsedBinding.schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
+      ? await resolveAcceptedGovernance({
+          authority: parsedBinding.governance,
+          gitExecutable,
+          bindingPath,
+          productSourceRoot: sourceRoot,
+          stateRoot: parsedBinding.stateRoot,
+          workspaceRoot: parsedBinding.workspaceRoot,
+        })
+      : null;
+  const trackerRuntime =
+    governance === null
+      ? null
+      : deriveTrackerPolicyRuntime(governance.trackerPolicy);
+  const binding: NormalizedDeploymentBindingDocument = {
+    ...parsedBinding,
+    governance:
+      parsedBinding.schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
+        ? parsedBinding.governance
+        : null,
+    deliveryProvider: parsedBinding.deliveryProvider ?? null,
+    tracker:
+      trackerRuntime === null
+        ? (parsedBinding.tracker as LegacyTrackerBinding)
+        : {
+            ...parsedBinding.tracker,
+            ...trackerRuntime,
+          },
+  };
 
   const resolvedRevision = await git(gitExecutable, sourceRoot, [
     "rev-parse",
@@ -1387,6 +1617,17 @@ export async function resolveDeploymentBinding(
   ) {
     refuse(
       "Deployment delivery-provider authority must be present exactly when the accepted product profile contains a delivery grant",
+    );
+  }
+  if (
+    binding.deliveryProvider?.proofAuthority !== null &&
+    binding.deliveryProvider?.proofAuthority !== undefined &&
+    !profile.deliveryGrant?.requiredChecks.includes(
+      binding.deliveryProvider.proofAuthority.requiredCheck,
+    )
+  ) {
+    refuse(
+      "Deployment proof authority must identify one check in the accepted product delivery grant",
     );
   }
   const baseSha = await git(gitExecutable, sourceRoot, [
@@ -1465,8 +1706,28 @@ export async function resolveDeploymentBinding(
     },
     authoringContext,
     deploymentBinding: { id: binding.id, digest: bindingDigest },
+    governanceManifest: governance?.manifestReference ?? null,
+    trackerPolicy: governance?.trackerPolicy ?? null,
     deliveryGrant: profile.deliveryGrant,
+    proofAuthority: binding.deliveryProvider?.proofAuthority ?? null,
   };
+
+  if (
+    profile.deliveryGrant !== null &&
+    governance !== null &&
+    (profile.deliveryGrant.governingPolicy.repositoryIdentity.toLowerCase() !==
+      governance.trackerPolicy.source.repositoryIdentity.toLowerCase() ||
+      profile.deliveryGrant.governingPolicy.path !==
+        governance.trackerPolicy.source.path ||
+      profile.deliveryGrant.governingPolicy.revision !==
+        governance.trackerPolicy.source.revision ||
+      profile.deliveryGrant.governingPolicy.digest !==
+        governance.trackerPolicy.source.digest)
+  ) {
+    refuse(
+      "Product delivery grant must exactly match the accepted tracker-policy reference",
+    );
+  }
 
   const codexExecutable = await executable(
     binding.runtime.codexExecutable,
@@ -1561,6 +1822,7 @@ export async function resolveDeploymentBinding(
       sourceRoot,
       stateRoot: binding.stateRoot,
       acceptedConfiguration,
+      doctrine: governance?.doctrineReference ?? null,
       codexExecutable,
       gitExecutable,
       deliveryProvider:
@@ -1569,6 +1831,7 @@ export async function resolveDeploymentBinding(
           : {
               ...binding.deliveryProvider,
               executable: deliveryProviderExecutable,
+              proofAuthority: binding.deliveryProvider.proofAuthority ?? null,
             },
       preparation: preparationAuthority,
       processContainment: {
@@ -1596,6 +1859,7 @@ export async function resolveDeploymentBinding(
     bindingDigest,
     bindingPath,
     acceptedConfiguration,
+    governance,
     profile,
     serviceConfig,
     workflow,

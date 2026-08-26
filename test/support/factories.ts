@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { Issue } from "../../src/domain/issue.js";
+import { parseTrackerPolicy } from "../../src/governance/tracker-policy.js";
 import type {
   TrackerConfigProfile,
   TrackerConfigProfiles,
@@ -19,6 +20,212 @@ export const testTrackerProfile: TrackerConfigProfile = {
 export const testTrackerProfiles: TrackerConfigProfiles = new Map([
   [testTrackerProfile.kind, testTrackerProfile],
 ]);
+
+export function protectedProofAuthorityFixture(
+  requiredCheck = "proof / Protected final",
+) {
+  return {
+    kind: "github-actions-reusable-workflow-v1" as const,
+    requiredCheck,
+    eventName: "pull_request_target" as const,
+    callerWorkflowPath: ".github/workflows/protected-proof-v2.yml",
+    controlWorkflow: {
+      repositoryIdentity: "reinispilens/workspace-control-plane",
+      path: ".github/workflows/protected-proof-v2.yml",
+      revision: "c".repeat(40),
+    },
+  };
+}
+
+export function acceptedGovernanceFixture() {
+  const revision = "b".repeat(40);
+  const repositoryIdentity = "reinispilens/.github";
+  const trackerPolicySource = {
+    repositoryIdentity,
+    path: "agent-system/tracker-policy.json",
+    revision,
+    digest: `sha256:${"2".repeat(64)}`,
+  };
+  const noDelivery = {
+    materialize: false,
+    push: false,
+    openPullRequest: false,
+    observeChecks: false,
+    mergePullRequest: false,
+    releaseRemoteBranch: false,
+    cleanupWorkspace: false,
+  };
+  const policy = {
+    schemaVersion: 1,
+    policyId: "reinispilens/test-tracker-v1",
+    drivers: {
+      exactlyOneRequired: true,
+      changeOnlyInLane: "Backlog",
+      labels: [
+        {
+          key: "direct",
+          name: "driver:direct",
+          color: "1D76DB",
+          description: "Human-driven test work.",
+        },
+        {
+          key: "symphony",
+          name: "driver:symphony",
+          color: "5319E7",
+          description: "Symphony-driven test work.",
+        },
+      ],
+    },
+    lanes: [
+      {
+        name: "Backlog",
+        writers: ["human"],
+        active: false,
+        terminal: false,
+        authoring: false,
+        freshAttempt: false,
+        delivery: noDelivery,
+      },
+      {
+        name: "Todo",
+        writers: ["human"],
+        active: true,
+        terminal: false,
+        authoring: true,
+        freshAttempt: false,
+        delivery: noDelivery,
+      },
+      {
+        name: "In Progress",
+        writers: ["agent", "human"],
+        active: true,
+        terminal: false,
+        authoring: true,
+        freshAttempt: false,
+        delivery: noDelivery,
+      },
+      {
+        name: "Human Review",
+        writers: ["agent", "human"],
+        active: false,
+        terminal: false,
+        authoring: false,
+        freshAttempt: false,
+        delivery: {
+          ...noDelivery,
+          materialize: true,
+          push: true,
+          openPullRequest: true,
+          observeChecks: true,
+          releaseRemoteBranch: true,
+          cleanupWorkspace: true,
+        },
+      },
+      {
+        name: "Merging",
+        writers: ["human"],
+        active: true,
+        terminal: false,
+        authoring: false,
+        freshAttempt: false,
+        delivery: {
+          ...noDelivery,
+          materialize: true,
+          push: true,
+          openPullRequest: true,
+          observeChecks: true,
+          mergePullRequest: true,
+          releaseRemoteBranch: true,
+          cleanupWorkspace: true,
+        },
+      },
+      {
+        name: "Rework",
+        writers: ["human"],
+        active: true,
+        terminal: false,
+        authoring: true,
+        freshAttempt: true,
+        delivery: {
+          ...noDelivery,
+          releaseRemoteBranch: true,
+          cleanupWorkspace: true,
+        },
+      },
+      {
+        name: "Done",
+        writers: ["agent", "human"],
+        active: false,
+        terminal: true,
+        authoring: false,
+        freshAttempt: false,
+        delivery: {
+          ...noDelivery,
+          releaseRemoteBranch: true,
+          cleanupWorkspace: true,
+        },
+      },
+      {
+        name: "Cancelled",
+        writers: ["agent", "human"],
+        active: false,
+        terminal: true,
+        authoring: false,
+        freshAttempt: false,
+        delivery: {
+          ...noDelivery,
+          releaseRemoteBranch: true,
+          cleanupWorkspace: true,
+        },
+      },
+    ],
+    deliveryProfiles: {
+      "owner-gated": [
+        "materialize",
+        "push",
+        "openPullRequest",
+        "observeChecks",
+        "observeMerge",
+        "releaseRemoteBranch",
+        "cleanupWorkspace",
+      ],
+      "full-in-scope": [
+        "materialize",
+        "push",
+        "openPullRequest",
+        "observeChecks",
+        "mergePullRequest",
+        "observeMerge",
+        "releaseRemoteBranch",
+        "cleanupWorkspace",
+      ],
+    },
+    retry: {
+      continuation: "same-work-session-and-workspace",
+      failure: "same-work-session-with-bounded-backoff",
+      rework: "fresh-attempt-discarding-prior-workspace-and-workpad",
+      freshAttemptFailureLane: "Human Review",
+    },
+  };
+  return {
+    doctrine: {
+      repositoryIdentity,
+      path: "agent-system/golden-principles.md",
+      revision,
+      digest: `sha256:${"1".repeat(64)}`,
+    },
+    governanceManifest: {
+      repositoryIdentity,
+      path: "agent-system/accepted-governance.json",
+      revision: "c".repeat(40),
+      digest: `sha256:${"3".repeat(64)}`,
+    },
+    trackerPolicy: parseTrackerPolicy(
+      Buffer.from(JSON.stringify(policy)),
+      trackerPolicySource,
+    ),
+  };
+}
 
 export function issue(overrides: Partial<Issue> = {}): Issue {
   return {
