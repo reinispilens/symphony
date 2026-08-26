@@ -381,6 +381,25 @@ describe("SqliteSymphonyStateStore", () => {
           now: "2026-08-25T10:00:02.000Z",
         }),
       ).toThrowError(expect.objectContaining({ code: "workspace_conflict" }));
+
+      expect(() =>
+        store.attachHumanWorkspace({
+          sessionId: second.id,
+          expectedRevision: second.revision,
+          controllerId: second.controller.controllerId,
+          path: "/worktrees/shared/nested-repository",
+          repositoryIdentity: "reinispilens/symphony",
+          inspection: {
+            status: "observed",
+            headSha: "d".repeat(40),
+            trackedChanges: false,
+            untrackedChanges: false,
+            ignoredChanges: false,
+            observedAt: "2026-08-25T10:00:02.000Z",
+          },
+          now: "2026-08-25T10:00:02.000Z",
+        }),
+      ).toThrowError(expect.objectContaining({ code: "workspace_conflict" }));
     } finally {
       store.close();
     }

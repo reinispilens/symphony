@@ -1,7 +1,7 @@
 # Accepted governance composition plan
 
-Status: `.github` contribution prepared and Symphony runtime implemented; accepted repin, consumer
-pilot, and boardless manual controller pending, 2026-08-26
+Status: `.github` contribution prepared and Symphony runtime plus boardless manual controller
+implemented; accepted repin and consumer pilot pending, 2026-08-27
 
 Parent plan: [orchestration estate alignment](orchestration-estate-alignment-plan.md), Phase 6.
 
@@ -10,8 +10,9 @@ principles reconciliation, the estate checker, and the ported enforcement-tiers,
 system-conformance, and documentation-lifecycle documents. This work owns only onboarding,
 delivery cadence, and tracker policy in `.github`; its accepted-snapshot digest is intentionally
 repinned once, by the Spec 001 owner, after final golden-principles wording lands. In Symphony,
-sections B and C below are implemented locally and must pass the complete Node gate before landing.
-Section D remains later integration work and does not weaken the consumer boundary.
+sections B and C plus Section D's manual-control item are implemented locally and must pass the
+complete Node gate before landing. The template and consumer journey in Section D remain later
+integration work and do not weaken the consumer boundary.
 
 ## The change in one picture
 
@@ -229,8 +230,9 @@ facts; no comment-text heuristic is permitted.
    its harness.
 3. Run one disposable board-backed journey through authoring, Human Review, protected WCP proof,
    Merging, cleanup, and Done, including restart and cancellation evidence.
-4. Build the boardless `symphony work` commands over the same state/application ports and run an
-   equivalent human-driven journey.
+4. The boardless `symphony work` commands are implemented over the same state/application ports;
+   their deterministic human-driven restart journey is green. Run the live equivalent only after
+   the final accepted-governance repin.
 
 ## Proof matrix
 

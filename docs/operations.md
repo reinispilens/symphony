@@ -18,24 +18,29 @@ product A @ accepted Git SHA       operator binding v3 │
 profile + prompt/context           tracker + roots + runtime + WCP trust anchor
                 └───────────────┬───────────────┘
                                   ▼
-                       accepted configuration
-                                  │
-                       symphony@repository-a.service ──▶ Project A
-                                  │
-                                  ├── managed Git worktrees
-                                  ├── sandboxed preparation
-                                  ├── systemd user scopes for agent descendants
-                                  └── durable PR/proof/delivery reconciliation
-                                  ▼
-                           state-root/state.sqlite
-                        WorkSessions · leases · sagas · outbox
+                      accepted configuration
+                                │
+             ┌──────────────────┴──────────────────┐
+             ▼                                     ▼
+symphony@repository-a.service ──▶ Project A   local `symphony work`
+             │                                     │
+             ├── managed Git worktrees             └── human-owned checkout reference
+             ├── sandboxed preparation                         │
+             ├── systemd-scoped agents                         │
+             └── durable PR/proof/delivery                      │
+             └──────────────────┬───────────────────────────────┘
+                                ▼
+                         state-root/state.sqlite
+                      WorkSessions · leases · sagas · outbox
 
 one service instance = one repository = one workspace root = one Project
 ```
 
-Symphony is a daemon, not a command that should be launched once per issue. A supervisor keeps one
-instance alive for each repository. For managed Git, an operator-owned binding is the deployment
-contract. Version 3 pins one accepted `.github` publication plus one product profile/context
+Tracker-origin Symphony is a daemon, not a command that should be launched once per issue. A
+supervisor keeps one instance alive for each repository. Boardless manual commands are deliberately
+short-lived and reopen that binding's same state store for one revision-fenced operation. For
+managed Git, an operator-owned binding is the deployment contract. Version 3 pins one accepted
+`.github` publication plus one product profile/context
 revision and supplies the Project, host roots, capacity, runtime, delivery credentials,
 process-containment authority, one exact WCP reusable-workflow trust anchor, and—when pnpm is
 selected—the exact preparation toolchain plus offline dependency policy. Running several
@@ -102,6 +107,55 @@ unsandboxed or shared-network fallback. Each live authoring runtime receives one
 directory below `<stateRoot>/agent-runtime/` and one deterministic user scope. App-server exit does
 not release authority: Symphony signals the complete cgroup, proves it empty, removes private
 runtime state, and only then releases the lease.
+
+## Operate a human-controlled WorkSession
+
+Run manual commands as the same operating-system identity that can read the operator binding and
+its private state root. This local filesystem authority is the MVP caller boundary; there is no
+network listener or reusable controller token. The commands validate delivery-provider authority
+but do not require or invoke its secret because they cannot prove or deliver work.
+
+```bash
+SYMPHONY=/absolute/path/to/symphony/dist/cli.js
+BINDING=/absolute/operator/deployment-binding.json
+
+node "$SYMPHONY" work start --binding "$BINDING" --intent "Describe the outcome"
+```
+
+Copy the returned session ID and revision into subsequent commands:
+
+```bash
+node "$SYMPHONY" work attach --binding "$BINDING" --session <id> --expected-revision 1 --path /absolute/product-checkout
+node "$SYMPHONY" work plan --binding "$BINDING" --session <id> --expected-revision 2 --file /absolute/plan.md
+node "$SYMPHONY" work steer --binding "$BINDING" --session <id> --expected-revision 3 --message "A correction"
+node "$SYMPHONY" work status --binding "$BINDING" --session <id>
+node "$SYMPHONY" work status --binding "$BINDING" --session <id> --json
+```
+
+Use the revision printed by the immediately preceding successful mutation; a stale value is an
+intentional concurrency refusal. The plan file has this minimal form:
+
+```markdown
+## Plan
+
+Explain the intended steps and boundary.
+
+## Acceptance criteria
+
+- Name one observable completion condition.
+- Name another completion condition.
+```
+
+`attach` does not switch branches, install dependencies, start a coding agent, or change repository
+bytes. A nested path is recorded as its canonical Git root. Symlinks, wrong origins, control-root
+overlap, and paths already claimed by an active WorkSession are refused. There is no detach command
+in this MVP because the attachment is durable evidence and never Symphony cleanup authority.
+
+`status --json` is designed for local tools but is not the raw aggregate: lease tokens, effect
+payloads, provider errors, prompts, environment values, and transcripts are omitted. Back up and
+restore the manual session through the same `<stateRoot>/state.sqlite` procedure below. Do not copy
+the database while a daemon or manual writer can still mutate it; use the store's online backup
+port from embedding code or stop the daemon before the documented offline copy.
 
 Managed Git commands do not inherit `GIT_DIR`, `GIT_WORK_TREE`, configuration injection, replacement
 objects, global/system config, hooks, fsmonitor, or recursive submodule behavior. Before allocation,

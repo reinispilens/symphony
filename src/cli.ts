@@ -10,6 +10,11 @@ import { TrustedSourceMaterializer } from "./delivery/materializer.js";
 import { ExternalDeliveryProvider } from "./delivery/provider.js";
 import { resolveDeploymentBinding } from "./deployment/resolver.js";
 import { errorMessage, SymphonyError } from "./errors.js";
+import {
+  executeManualWorkCommand,
+  type ManualWorkCommand,
+  type ManualWorkCommandRunner,
+} from "./interactive/command.js";
 import { JsonLineLogger, type Logger } from "./observability/logger.js";
 import { RoutingPreparationDriver } from "./preparation/driver.js";
 import { PnpmPreparationDriver } from "./preparation/pnpm-driver.js";
@@ -40,8 +45,10 @@ import { SYMPHONY_VERSION } from "./version.js";
 
 const USAGE = `Usage: symphony [path-to-WORKFLOW.md]
        symphony --binding path-to-deployment-binding.json
+       symphony work <command> [options]
 
 Run one long-lived Symphony daemon for one repository binding or compatibility workflow.
+Use 'symphony work --help' for durable human-controlled WorkSessions.
 
 Managed deployments use an operator-owned binding. Positional WORKFLOW.md is
 the compatibility path for existing directory/harness consumers.
@@ -51,9 +58,22 @@ Options:
   -v, --version    Show the version
 `;
 
+const WORK_USAGE = `Usage: symphony work start  --binding <absolute-path> --intent <text>
+       symphony work attach --binding <absolute-path> --session <id> --expected-revision <n> --path <absolute-checkout>
+       symphony work plan   --binding <absolute-path> --session <id> --expected-revision <n> --file <plan.md>
+       symphony work steer  --binding <absolute-path> --session <id> --expected-revision <n> --message <text>
+       symphony work status --binding <absolute-path> --session <id> [--json]
+
+Create and steer one boardless WorkSession in the existing binding-owned state store.
+Every invocation revalidates the same exact operator binding. These commands do not
+start an agent, create a managed workspace, run product code, or mutate a tracker.
+`;
+
 type CliArguments =
   | { readonly action: "help" }
+  | { readonly action: "work-help" }
   | { readonly action: "version" }
+  | { readonly action: "work"; readonly command: ManualWorkCommand }
   | {
       readonly action: "run";
       readonly source:
@@ -89,9 +109,177 @@ export interface CliDependencies {
   readonly stderr?: Pick<NodeJS.WritableStream, "write">;
   readonly stdout?: Pick<NodeJS.WritableStream, "write">;
   readonly waitForShutdown?: () => Promise<string>;
+  readonly workCommandRunner?: ManualWorkCommandRunner;
+}
+
+function workOptionMap(
+  argv: readonly string[],
+  allowedValues: readonly string[],
+  allowedFlags: readonly string[] = [],
+): {
+  readonly flags: ReadonlySet<string>;
+  readonly values: ReadonlyMap<string, string>;
+} {
+  const values = new Map<string, string>();
+  const flags = new Set<string>();
+  for (let index = 0; index < argv.length; index += 1) {
+    const option = argv[index]!;
+    if (allowedFlags.includes(option)) {
+      if (flags.has(option))
+        throw new Error(`${option} may be specified only once`);
+      flags.add(option);
+      continue;
+    }
+    if (!allowedValues.includes(option)) {
+      throw new Error(`unknown work option '${option}'`);
+    }
+    if (values.has(option))
+      throw new Error(`${option} may be specified only once`);
+    const value = argv[index + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error(`${option} requires a value`);
+    }
+    if (value.trim() === "") throw new Error(`${option} must not be blank`);
+    values.set(option, value);
+    index += 1;
+  }
+  return { flags, values };
+}
+
+function requiredWorkOption(
+  options: ReadonlyMap<string, string>,
+  name: string,
+): string {
+  const value = options.get(name);
+  if (value === undefined) throw new Error(`${name} is required`);
+  return value;
+}
+
+function absoluteWorkPath(value: string, option: string): string {
+  if (!path.isAbsolute(value) || /[\0\r\n]/u.test(value)) {
+    throw new Error(`${option} must be an absolute path`);
+  }
+  return path.resolve(value);
+}
+
+function expectedRevision(options: ReadonlyMap<string, string>): number {
+  const source = requiredWorkOption(options, "--expected-revision");
+  if (!/^[1-9]\d*$/u.test(source)) {
+    throw new Error("--expected-revision must be an integer >= 1");
+  }
+  const revision = Number(source);
+  if (!Number.isSafeInteger(revision)) {
+    throw new Error("--expected-revision must be a safe integer");
+  }
+  return revision;
+}
+
+function parseWorkArguments(argv: readonly string[]): CliArguments {
+  if (
+    argv.length === 0 ||
+    (argv.length === 1 && (argv[0] === "-h" || argv[0] === "--help"))
+  ) {
+    return { action: "work-help" };
+  }
+  const command = argv[0]!;
+  const remaining = argv.slice(1);
+  const binding = (options: ReadonlyMap<string, string>) =>
+    absoluteWorkPath(requiredWorkOption(options, "--binding"), "--binding");
+  const session = (options: ReadonlyMap<string, string>) =>
+    requiredWorkOption(options, "--session");
+
+  switch (command) {
+    case "start": {
+      const parsed = workOptionMap(remaining, ["--binding", "--intent"]);
+      return {
+        action: "work",
+        command: {
+          action: "start",
+          bindingPath: binding(parsed.values),
+          intent: requiredWorkOption(parsed.values, "--intent"),
+        },
+      };
+    }
+    case "attach": {
+      const parsed = workOptionMap(remaining, [
+        "--binding",
+        "--session",
+        "--expected-revision",
+        "--path",
+      ]);
+      return {
+        action: "work",
+        command: {
+          action: "attach",
+          bindingPath: binding(parsed.values),
+          sessionId: session(parsed.values),
+          expectedRevision: expectedRevision(parsed.values),
+          path: absoluteWorkPath(
+            requiredWorkOption(parsed.values, "--path"),
+            "--path",
+          ),
+        },
+      };
+    }
+    case "plan": {
+      const parsed = workOptionMap(remaining, [
+        "--binding",
+        "--session",
+        "--expected-revision",
+        "--file",
+      ]);
+      return {
+        action: "work",
+        command: {
+          action: "plan",
+          bindingPath: binding(parsed.values),
+          sessionId: session(parsed.values),
+          expectedRevision: expectedRevision(parsed.values),
+          filePath: requiredWorkOption(parsed.values, "--file"),
+        },
+      };
+    }
+    case "steer": {
+      const parsed = workOptionMap(remaining, [
+        "--binding",
+        "--session",
+        "--expected-revision",
+        "--message",
+      ]);
+      return {
+        action: "work",
+        command: {
+          action: "steer",
+          bindingPath: binding(parsed.values),
+          sessionId: session(parsed.values),
+          expectedRevision: expectedRevision(parsed.values),
+          message: requiredWorkOption(parsed.values, "--message"),
+        },
+      };
+    }
+    case "status": {
+      const parsed = workOptionMap(
+        remaining,
+        ["--binding", "--session"],
+        ["--json"],
+      );
+      return {
+        action: "work",
+        command: {
+          action: "status",
+          bindingPath: binding(parsed.values),
+          sessionId: session(parsed.values),
+          json: parsed.flags.has("--json"),
+        },
+      };
+    }
+    default:
+      throw new Error(`unknown work command '${command}'`);
+  }
 }
 
 export function parseCliArguments(argv: readonly string[]): CliArguments {
+  if (argv[0] === "work") return parseWorkArguments(argv.slice(1));
   let workflowPath: string | undefined;
   let bindingPath: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
@@ -306,6 +494,10 @@ export async function runCli(
     stdout.write(USAGE);
     return 0;
   }
+  if (parsed.action === "work-help") {
+    stdout.write(WORK_USAGE);
+    return 0;
+  }
   if (parsed.action === "version") {
     stdout.write(`symphony ${SYMPHONY_VERSION}\n`);
     return 0;
@@ -313,6 +505,25 @@ export async function runCli(
 
   const cwd = dependencies.cwd ?? process.cwd();
   const environment = dependencies.environment ?? process.env;
+  if (parsed.action === "work") {
+    const command: ManualWorkCommand =
+      parsed.command.action === "plan"
+        ? {
+            ...parsed.command,
+            filePath: path.resolve(cwd, parsed.command.filePath),
+          }
+        : parsed.command;
+    try {
+      const result = await (
+        dependencies.workCommandRunner ?? executeManualWorkCommand
+      )(command, { environment });
+      stdout.write(`${result}\n`);
+      return 0;
+    } catch (error) {
+      stderr.write(`symphony work: ${errorMessage(error)}\n`);
+      return 1;
+    }
+  }
   const logger = dependencies.logger ?? new JsonLineLogger();
   const source: DaemonSource =
     parsed.source.kind === "binding"

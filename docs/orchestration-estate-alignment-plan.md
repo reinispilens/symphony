@@ -26,16 +26,17 @@ Related Symphony decisions:
 
 ## Execution checkpoint
 
-Updated 2026-08-26. A merged commit is accepted authority; a local candidate remains evidence only.
+Updated 2026-08-27. A merged commit is accepted authority; a local candidate remains evidence only.
 
-| Phase | Evidence                                                                                                                                                                                 | Status / next boundary                                 |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| 0     | Golden principles and estate boundaries merged in `.github`; portable governance publication merged at `7b98b03` and pins accepted source `7309109` plus exact doctrine/policy digests   | Complete                                               |
-| 1–3   | Symphony durable WorkSession, RepositoryDriver, managed worktrees, exact binding/context, systemd quiescence, and offline pnpm preparation merged at `7514735`                           | Complete                                               |
-| 4     | WCP proof v2 and runner admission merged through `c1d1983`; Dyslexify push and PR canaries passed; cancelled attempt removed both GitHub runner and GARM VM with no residue              | Complete                                               |
-| 5     | Local Symphony candidate implements bounded source materialization, typed delivery provider, durable exact-head saga, authority-separated merge, remote release, and crash/restart tests | Run full gates, review, and merge before claiming exit |
-| 6a    | `.github` tracker policy and derived board/driver tooling merged at `7309109`; accepted publication merged at `7b98b03`                                                                  | Onboarding/boundary retirement remains                 |
-| 6b–9  | No exit claimed                                                                                                                                                                          | Implement and prove each owner in the order below      |
+| Phase | Evidence                                                                                                                                                                    | Status / next boundary                                   |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| 0     | Estate boundaries and the first portable governance publication are merged; freeze/baseline evidence is recorded                                                            | Complete                                                 |
+| 1–3   | Symphony durable WorkSession, RepositoryDriver, managed worktrees, exact binding/context, systemd quiescence, and offline pnpm preparation merged at `7514735`              | Complete                                                 |
+| 4     | WCP proof v2, capacity-one admission, publisher-disabled authority boundary, and clean disposable VM drill are merged through WCP PR #29                                    | Complete                                                 |
+| 5     | Symphony materialization, exact-head proof/delivery saga, grant-constrained merge, release, recovery, and governance composition are merged through `b27987b`               | Complete                                                 |
+| 6     | Onboarding/delivery/tracker-policy contribution merged into `.github` Spec 001 at `d6b61e9`; T031/T032 and the one T034 accepted-snapshot repin remain owned by that branch | Wait for Spec 001 owner; do not edit its files here      |
+| 7–8   | Template thinning and the composed Dyslexify autonomous pilot have no accepted exit in this checkpoint                                                                      | Remain after final publication                           |
+| 9     | Symphony manual application/CLI plus a five-fresh-process binding/Git/SQLite journey pass 297 tests on `feat/interactive-control`                                           | Publish candidate; live journey waits for the T034 repin |
 
 This checkpoint prevents two opposite errors: describing already-written candidate code as merely
 "proposed," or describing unmerged code as an accepted estate capability.
@@ -1306,17 +1307,18 @@ applies.
 **Exit:** Dyslexify contains only product truth and thin adapters, with complete authoring, proof,
 delivery, recovery, and cleanup evidence.
 
-### Phase 9: manual MVP
+### Phase 9: manual MVP — implementation complete, live repin journey pending
 
 **Repository:** Symphony. This phase is detailed by
 [`interactive-control-plan.md`](interactive-control-plan.md).
 
 1. Add `start`, `attach`, `plan`, `steer`, and `status` over the same `SymphonyStateStore` and
    WorkSession application service used by tracker origin.
-2. Start only from an explicit absolute operator-binding file that passes the same resolver as the
-   daemon; pin its internal ID and digest and bind the attached checkout to the same accepted
-   repository/profile identity. Do not accept candidate workflow paths as authority and do not
-   invent a binding registry merely for this command.
+2. Require the same explicit absolute operator-binding file on every command and pass it through the
+   daemon's resolver; pin its internal ID and digest and bind the attached checkout to the same
+   accepted repository/profile identity. A session ID is scoped to that binding's state store and
+   is not a global locator. Do not accept candidate workflow paths as authority and do not invent a
+   binding registry merely for these commands.
 3. Record attached checkouts as session-level human-owned references, never Attempt workspace
    leases, and make them mechanically non-removable.
 4. Keep attached dirty-tree proof local and advisory until work is committed or a future protected
@@ -1327,6 +1329,11 @@ delivery, recovery, and cleanup evidence.
 
 **Exit:** the user can drive the current conversational workflow with durable intent, plan,
 steering history, and status while remaining the orchestrator.
+
+The application service, five commands, hostile-path fixtures, and five-fresh-process CLI restart
+journey are implemented on the Symphony feature branch. The exit becomes live estate evidence only
+after Spec 001's final publication is repinned and the same journey starts under that accepted
+doctrine; no `.github` or product-harness substitute is permitted from this phase.
 
 ### Follow-on migrations, not alignment blockers
 

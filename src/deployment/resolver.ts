@@ -59,6 +59,8 @@ export interface DeploymentResolutionOptions {
   readonly bindingPath: string;
   readonly trackerProfiles: TrackerConfigProfiles;
   readonly environment?: Readonly<Record<string, string | undefined>>;
+  /** Manual record-only commands validate provider authority but do not need an unused secret. */
+  readonly requireDeliverySecrets?: boolean;
   readonly now?: () => Date;
 }
 
@@ -1767,9 +1769,11 @@ export async function resolveDeploymentBinding(
     );
   }
   const sourceEnvironment = options.environment ?? process.env;
-  for (const name of binding.deliveryProvider?.secretEnvironmentNames ?? []) {
-    if ((sourceEnvironment[name] ?? "").trim() === "") {
-      refuse(`Deployment delivery-provider secret ${name} is missing`);
+  if (options.requireDeliverySecrets !== false) {
+    for (const name of binding.deliveryProvider?.secretEnvironmentNames ?? []) {
+      if ((sourceEnvironment[name] ?? "").trim() === "") {
+        refuse(`Deployment delivery-provider secret ${name} is missing`);
+      }
     }
   }
   const preparationAuthority = await resolvePreparationAuthority(

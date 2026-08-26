@@ -89,6 +89,145 @@ describe("Symphony CLI", () => {
     ).toThrow("cannot be combined");
   });
 
+  it("parses the five manual WorkSession commands with an explicit binding", () => {
+    const binding = "/etc/symphony/widget.json";
+    expect(
+      parseCliArguments([
+        "work",
+        "start",
+        "--intent",
+        "Build the widget",
+        "--binding",
+        binding,
+      ]),
+    ).toEqual({
+      action: "work",
+      command: {
+        action: "start",
+        bindingPath: binding,
+        intent: "Build the widget",
+      },
+    });
+    expect(
+      parseCliArguments([
+        "work",
+        "attach",
+        "--binding",
+        binding,
+        "--session",
+        "session-1",
+        "--expected-revision",
+        "4",
+        "--path",
+        "/worktrees/widget",
+      ]),
+    ).toEqual({
+      action: "work",
+      command: {
+        action: "attach",
+        bindingPath: binding,
+        sessionId: "session-1",
+        expectedRevision: 4,
+        path: "/worktrees/widget",
+      },
+    });
+    expect(
+      parseCliArguments([
+        "work",
+        "plan",
+        "--binding",
+        binding,
+        "--session",
+        "session-1",
+        "--expected-revision",
+        "5",
+        "--file",
+        "plan.md",
+      ]),
+    ).toMatchObject({
+      action: "work",
+      command: { action: "plan", filePath: "plan.md" },
+    });
+    expect(
+      parseCliArguments([
+        "work",
+        "steer",
+        "--binding",
+        binding,
+        "--session",
+        "session-1",
+        "--expected-revision",
+        "6",
+        "--message",
+        "Keep the adapter thin",
+      ]),
+    ).toMatchObject({
+      action: "work",
+      command: { action: "steer", message: "Keep the adapter thin" },
+    });
+    expect(
+      parseCliArguments([
+        "work",
+        "status",
+        "--session",
+        "session-1",
+        "--json",
+        "--binding",
+        binding,
+      ]),
+    ).toEqual({
+      action: "work",
+      command: {
+        action: "status",
+        bindingPath: binding,
+        sessionId: "session-1",
+        json: true,
+      },
+    });
+  });
+
+  it("refuses ambiguous or unsafe manual WorkSession arguments", () => {
+    expect(() =>
+      parseCliArguments([
+        "work",
+        "start",
+        "--binding",
+        "relative.json",
+        "--intent",
+        "work",
+      ]),
+    ).toThrow("--binding must be an absolute path");
+    expect(() =>
+      parseCliArguments([
+        "work",
+        "attach",
+        "--binding",
+        "/binding.json",
+        "--session",
+        "one",
+        "--expected-revision",
+        "0",
+        "--path",
+        "/repo",
+      ]),
+    ).toThrow("integer >= 1");
+    expect(() =>
+      parseCliArguments([
+        "work",
+        "status",
+        "--binding",
+        "/binding.json",
+        "--session",
+        "one",
+        "--json",
+        "--json",
+      ]),
+    ).toThrow("only once");
+    expect(() => parseCliArguments(["work", "launch"])).toThrow(
+      "unknown work command",
+    );
+  });
+
   it("prints help and version without constructing a daemon", async () => {
     const stdout: string[] = [];
     const hostFactory = vi.fn();
@@ -98,9 +237,79 @@ describe("Symphony CLI", () => {
     await expect(
       runCli(["--version"], { hostFactory, stdout: writer(stdout) }),
     ).resolves.toBe(0);
+    await expect(
+      runCli(["work", "--help"], { hostFactory, stdout: writer(stdout) }),
+    ).resolves.toBe(0);
     expect(stdout.join("")).toContain("Usage: symphony");
     expect(stdout.join("")).toContain("symphony 0.1.0");
+    expect(stdout.join("")).toContain("symphony work start");
     expect(hostFactory).not.toHaveBeenCalled();
+  });
+
+  it("runs a manual command without constructing a daemon or logger", async () => {
+    const stdout: string[] = [];
+    const hostFactory = vi.fn();
+    const workCommandRunner = vi.fn(
+      async () => "WorkSession session-1 updated.",
+    );
+    await expect(
+      runCli(
+        [
+          "work",
+          "plan",
+          "--binding",
+          "/etc/symphony/widget.json",
+          "--session",
+          "session-1",
+          "--expected-revision",
+          "3",
+          "--file",
+          "plans/current.md",
+        ],
+        {
+          cwd: "/repo",
+          environment: { TEST_TOKEN: "present" },
+          hostFactory,
+          stdout: writer(stdout),
+          workCommandRunner,
+        },
+      ),
+    ).resolves.toBe(0);
+    expect(workCommandRunner).toHaveBeenCalledWith(
+      {
+        action: "plan",
+        bindingPath: "/etc/symphony/widget.json",
+        sessionId: "session-1",
+        expectedRevision: 3,
+        filePath: "/repo/plans/current.md",
+      },
+      { environment: { TEST_TOKEN: "present" } },
+    );
+    expect(stdout.join("")).toBe("WorkSession session-1 updated.\n");
+    expect(hostFactory).not.toHaveBeenCalled();
+  });
+
+  it("reports a manual command failure without daemon JSON logging", async () => {
+    const stderr: string[] = [];
+    await expect(
+      runCli(
+        [
+          "work",
+          "status",
+          "--binding",
+          "/etc/symphony/widget.json",
+          "--session",
+          "missing",
+        ],
+        {
+          stderr: writer(stderr),
+          workCommandRunner: async () => {
+            throw new Error("session was not found");
+          },
+        },
+      ),
+    ).resolves.toBe(1);
+    expect(stderr.join("")).toBe("symphony work: session was not found\n");
   });
 
   it("resolves explicit and cwd-default workflow paths and shuts down normally", async () => {

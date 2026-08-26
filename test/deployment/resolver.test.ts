@@ -577,6 +577,24 @@ describe("deployment binding resolver", () => {
     });
   });
 
+  it("can validate record-only authority without requiring an unused delivery secret", async () => {
+    await withTempDirectory(async (directory) => {
+      const setup = await fixture(directory);
+      await selectDeliveryGrant(setup, "owner-gated");
+
+      const resolved = await resolveDeploymentBinding({
+        bindingPath: setup.bindingPath,
+        trackerProfiles: testTrackerProfiles,
+        environment: {},
+        requireDeliverySecrets: false,
+      });
+      expect(resolved.binding.deliveryProvider?.secretEnvironmentNames).toEqual(
+        ["DELIVERY_TOKEN"],
+      );
+      expect(JSON.stringify(resolved)).not.toContain("operator-secret");
+    });
+  });
+
   it("composes operator topology with product facts from one exact Git revision", async () => {
     await withTempDirectory(async (directory) => {
       const setup = await fixture(directory);
