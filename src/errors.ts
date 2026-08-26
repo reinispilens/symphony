@@ -14,6 +14,8 @@ export type SymphonyErrorCode =
   | "governance_refused"
   | "hook_failed"
   | "hook_timeout"
+  | "interactive_control_refused"
+  | "interactive_input_invalid"
   | "materialization_failed"
   | "materialization_refused"
   | "missing_workflow_file"

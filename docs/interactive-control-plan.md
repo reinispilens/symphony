@@ -1,6 +1,7 @@
 # Manual WorkSession MVP plan
 
-- Status: approved follow-on phase of
+- Status: implementation complete with deterministic restart journey; live binding journey waits
+  for the final accepted-governance repin and composed Dyslexify autonomous pilot. Follow-on phase of
   [`orchestration-estate-alignment-plan.md`](orchestration-estate-alignment-plan.md)
 - Recorded: 2026-08-25; revised after whole-plan state and authority review
 - Repository: Symphony
@@ -152,6 +153,10 @@ the relevant runtime/effect token, and an idempotency key. A stale CLI or daemon
 cannot write or act. `revision` and `controller generation` are deliberately different names: the
 first detects concurrent edits; the second invalidates prior authority after reassignment.
 
+The record-only command path uses the same strict binding resolver but does not require an unused
+delivery-provider secret to be present. It still validates the declared provider/executable and
+all accepted authority; it simply makes no provider call and gives no credential to the command.
+
 ## Workspace boundary
 
 The MVP adds one session-level reference to the WorkSession domain. It is intentionally not a
@@ -212,11 +217,15 @@ Command spelling is part of the MVP once implemented:
 
 ```text
 symphony work start  --binding /absolute/operator/deployment-binding.json --intent <text>
-symphony work attach --session <id> --expected-revision <n> --path <checkout>
-symphony work plan   --session <id> --expected-revision <n> --file <plan.md>
-symphony work steer  --session <id> --expected-revision <n> --message <text>
-symphony work status --session <id> [--json]
+symphony work attach --binding /absolute/operator/deployment-binding.json --session <id> --expected-revision <n> --path <checkout>
+symphony work plan   --binding /absolute/operator/deployment-binding.json --session <id> --expected-revision <n> --file <plan.md>
+symphony work steer  --binding /absolute/operator/deployment-binding.json --session <id> --expected-revision <n> --message <text>
+symphony work status --binding /absolute/operator/deployment-binding.json --session <id> [--json]
 ```
+
+Every command repeats the same exact binding. A session ID identifies a row inside the
+binding-owned state store but cannot locate that store by itself. Requiring explicit authority on
+each short-lived invocation preserves the plan's no-registry/no-sidecar boundary.
 
 ### `start`
 
@@ -235,9 +244,10 @@ containment, repository mismatch, or stale revision. It changes no repository by
 
 ### `plan`
 
-Replaces the current plan document while preserving its prior revision in the ordered event log.
-The Markdown input must contain `## Plan` and `## Acceptance criteria`; those sections become the
-two typed projections shown by `status`. It does not execute work.
+Replaces the current typed plan and increments its version. The Markdown input must contain exactly
+one `## Plan` and one non-empty `## Acceptance criteria` list; those sections become the two typed
+projections shown by `status`. The MVP retains the current plan rather than superseded plan bodies;
+the decision/steering/exception log is the append-only history. It does not execute work.
 
 ### `steer`
 
@@ -366,6 +376,28 @@ same state model; attached workspaces are identity-matched and mechanically non-
 dirty-tree evidence is labeled advisory; attachment creates no synthetic Attempt; and no automatic
 agent execution, multi-repository coordinator, handoff, copied orchestration, binding registry, or
 second store has been introduced.
+
+## Implementation outcome
+
+The Node implementation now contains the transport-independent application service and all five
+commands. Deterministic tests prove exact binding scoping, controller and optimistic-revision
+fencing, current-plan parsing/versioning, exception syntax and authority, read-only real-Git
+attachment inspection, symlink/control-root/repository refusals, no synthetic Attempt or lease,
+cross-process SQLite reopen, bounded status projection, token/error omission, and conservative
+advisory/protected evidence classification. An end-to-end journey runs the real CLI across five
+fresh Node processes against temporary product/governance Git repositories, one version-3 binding,
+and one independently reopened SQLite store.
+
+The unavoidable contract correction is that `--binding` appears on every command. No existing
+registry can locate an arbitrary private state root from a session UUID, and creating one would
+contradict the approved single-store boundary.
+
+Two rollout facts remain. Spec 001 must publish so the deployment can repin the final accepted
+doctrine that explicitly permits local human initiation, and the composed Dyslexify autonomous
+pilot must prove the shared authoring, proof, delivery, recovery, and cleanup path. Until then, the
+deterministic journey is implementation evidence, not a claim that a live boardless session is an
+accepted estate capability. Those gates do not justify changes to `.github` files from this branch
+or any product-repository harness.
 
 ## Lifetime of this document
 

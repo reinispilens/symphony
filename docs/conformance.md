@@ -1,23 +1,24 @@
 # Specification conformance record
 
-Status: compatibility profile plus managed governance/state/repository/preparation/delivery green,
-2026-08-26; protected real pilot pending
+Status: compatibility profile plus managed governance/state/repository/preparation/delivery and
+manual WorkSession control green, 2026-08-27; protected real pilot pending
 
 > [!IMPORTANT]
 > Passing evidence below distinguishes Symphony-controlled implementation proof from the remaining
 > estate integration gate. Accepted-governance resolution, the WorkSession store, repository and
 > preparation drivers, lane-aware orchestration, durable delivery, and host-authenticated WCP
-> workflow/artifact correlation have direct local evidence. The final accepted-publication repin and a composed
-> Dyslexify pilot remain unproven here.
+> workflow/artifact correlation plus manual start/attach/plan/steer/status have direct local
+> evidence. The final accepted-publication repin and a composed Dyslexify pilot remain unproven here.
 
 ## Evidence map
 
 ```text
 SPEC.md contract
-    ├── deterministic unit/contract tests ── 272 passing + 1 host-dependent skip
+    ├── deterministic unit/contract tests ── 297 passing + 1 host-dependent skip
     ├── isolated legacy daemon test ───────── GitHub + hooks + Codex + terminal cleanup
     ├── isolated managed daemon test ──────── governance + binding + SQLite + worktree + pnpm + Codex
     ├── real Git/process fixtures ─────────── restart, fencing, refusal, cleanup
+    ├── manual process journey ────────────── five fresh CLIs + binding + Git attach + SQLite reopen
     ├── opt-in host scope probe ───────────── detached descendant + cgroup quiescence
     ├── live read-only GitHub validation ─── repository, Project, fields, queries
     └── protected target mutation profile ── final publication repin + Dyslexify journey pending
@@ -43,7 +44,8 @@ proves component wiring without pretending that a fake Project is production evi
 | 17.4 orchestration                 | orchestrator tests, including quiescence-before-expiry and retained-lease refusal                                                               | pass    |
 | 17.5 Codex client                  | agent tests plus exact systemd-scope wrapper/refusal fixtures and executable fake app-server                                                    | pass    |
 | 17.6 observability                 | `test/observability/logger.test.ts`, `test/orchestrator/token-accounting.test.ts`, runtime snapshot assertions                                  | pass    |
-| 17.7 CLI/host                      | `test/cli.test.ts`, `test/systemd-unit.test.ts`                                                                                                 | pass    |
+| 17.7 CLI/host                      | daemon lifecycle plus five-command parsing/execution, exact binding, restart, status/privacy, and systemd unit tests                            | pass    |
+| manual WorkSession control         | `test/interactive/*` plus `test/e2e/manual-worksession.test.ts`: hostile operations and five-fresh-process real CLI journey                     | pass    |
 | GitHub agent-tool extension        | GraphQL mutation contract fixtures, exact target authorization, structured failures, and child-secret tests                                     | pass    |
 | legacy harness workspace extension | teardown ownership, failure retention, partial-create safety, and real empty-directory/adoption spike                                           | pass    |
 | fresh-attempt lifecycle extension  | legacy receipt tests plus managed state/generation/outbox/restart fixtures                                                                      | pass    |
@@ -87,6 +89,7 @@ created or changed during that validation.
 | durable GitHub/WCP delivery                      | pinned event/caller/control SHA, exact source/PR/check/artifacts, CAS refs, merge bounds, restart/Rework fixtures           |
 | structured issue/session logs                    | JSON-lines serializer/fallback tests and orchestration context assertions                                                   |
 | operator-visible state                           | stderr logs plus read-only running/retrying/token/rate-limit snapshot                                                       |
+| manual boardless state                           | exact-binding local CLI, current plan, append-only steering, human attachment, bounded human/JSON status                    |
 
 The optional HTTP server is not implemented, so its extension profile does not apply. Provider-
 native GitHub tools and the legacy `workspace.provider: harness` teardown extension remain covered,
@@ -104,13 +107,14 @@ pnpm check
 pnpm build
 node dist/cli.js --help
 node dist/cli.js --version
+node dist/cli.js work --help
 ```
 
-The 2026-08-26 governance/delivery gate completed 38 passing test files plus one host-dependent
-skipped file: 272 tests passed and one skipped. The strict TypeScript build passed, CLI usage
-rendered, and the version command reported `symphony 0.1.0`. Enabling the skipped systemd
-integration remains a separate host probe. This supersedes the 2026-08-25 foundation checkpoint of
-227 passing tests plus the same host-dependent skip.
+The 2026-08-27 manual-control gate completed 43 passing test files plus one host-dependent skipped
+file: 297 tests passed and one skipped. The strict TypeScript build passed, daemon and manual CLI
+usage rendered, and the version command reported `symphony 0.1.0`. Enabling the skipped systemd
+integration remains a separate host probe. This supersedes the 2026-08-26 governance/delivery
+checkpoint of 272 passing tests plus the same host-dependent skip.
 
 A separate design probe against installed `codex-cli 0.147.0` used app-server `command/exec` with
 the exact managed policy. It could write inside the linked Attempt but could not run `git
@@ -128,9 +132,10 @@ the deterministic scope, orchestration-order, and retained-lease tests remain ma
 
 ## Honest boundary of the evidence
 
-The real integration profile is not counted as passed. WCP proof v2 and Symphony's durable
-governance/delivery consumers exist, but the final Spec 001 publication has not yet been repinned and
-the components have not completed one disposable Dyslexify journey together. After that repin, the
+The real integration profile is not counted as passed. WCP proof v2, Symphony's durable
+governance/delivery consumers, and deterministic manual control exist, but the final Spec 001
+publication has not yet been repinned and the components have not completed one disposable
+Dyslexify journey together. After that repin, the
 production gate must record the Project item, WorkSession/Attempt, pinned doctrine/manifest/policy,
 workspace lease, base/head SHAs, Codex correlation, protected plan/result/run/check identities, pull
 request, terminal cleanup, and absence of tracker/delivery credentials in candidate execution.

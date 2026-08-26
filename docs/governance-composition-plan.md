@@ -1,7 +1,7 @@
 # Accepted governance composition plan
 
-Status: `.github` contribution prepared and Symphony runtime implemented; accepted repin, consumer
-pilot, and boardless manual controller pending, 2026-08-26
+Status: `.github` contribution merged to Spec 001; Symphony runtime, boardless manual controller,
+and thin workspace template implemented; accepted repin and consumer pilot pending, 2026-08-27
 
 Parent plan: [orchestration estate alignment](orchestration-estate-alignment-plan.md), Phase 6.
 
@@ -10,8 +10,10 @@ principles reconciliation, the estate checker, and the ported enforcement-tiers,
 system-conformance, and documentation-lifecycle documents. This work owns only onboarding,
 delivery cadence, and tracker policy in `.github`; its accepted-snapshot digest is intentionally
 repinned once, by the Spec 001 owner, after final golden-principles wording lands. In Symphony,
-sections B and C below are implemented locally and must pass the complete Node gate before landing.
-Section D remains later integration work and does not weaken the consumer boundary.
+sections B and C plus Section D's manual-control item are implemented locally and pass the complete
+Node gate. Workspace Repo Template PR #20 has merged Section D's thin generated shape. The
+Dyslexify consumer journey remains later integration work and does not weaken the consumer
+boundary.
 
 ## The change in one picture
 
@@ -224,13 +226,16 @@ facts; no comment-text heuristic is permitted.
 
 ### D. Consumer and manual-control gates
 
-1. Rebuild the workspace template to contain only thin declarations and product proof.
-2. Configure Dyslexify's v2 repository profile and an external v3 deployment binding; do not alter
-   its harness.
+1. Workspace Repo Template PR #20 rebuilt the generated shape around thin declarations and one
+   product proof; its hosted proof passed.
+2. Dyslexify PR #441 adds only the thin repository profile and remains draft for the final
+   tracker-policy repin. Install its external v3 deployment binding separately; do not alter its
+   harness.
 3. Run one disposable board-backed journey through authoring, Human Review, protected WCP proof,
    Merging, cleanup, and Done, including restart and cancellation evidence.
-4. Build the boardless `symphony work` commands over the same state/application ports and run an
-   equivalent human-driven journey.
+4. The boardless `symphony work` commands are implemented over the same state/application ports;
+   their deterministic human-driven restart journey is green. Run the live equivalent only after
+   the final accepted-governance repin.
 
 ## Proof matrix
 

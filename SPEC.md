@@ -15,13 +15,16 @@ behavior.
 
 ## 1. Problem Statement
 
-Symphony is a long-running automation service that continuously reads work from a configured issue
-tracker, creates an isolated workspace for each issue, and runs a coding agent session for that
-issue inside the workspace.
+Symphony is an orchestration system with two initiation paths. Its daemon continuously reads
+authorized work from a configured issue tracker, creates an isolated workspace for each item, and
+runs a coding-agent session inside that workspace. Its local manual surface records a boardless
+human-controlled WorkSession without starting an agent or adopting the human checkout.
 
 The service solves four operational problems:
 
 - It turns issue execution into a repeatable daemon workflow instead of manual scripts.
+- It makes an existing human-driven coding conversation durable without pretending the board or a
+  Symphony-spawned agent owns that work.
 - It isolates agent execution in per-issue workspaces so agent commands run only inside per-issue
   workspace directories.
 - It keeps portable product identity and authoring context in-repo while keeping host/runtime
@@ -59,6 +62,8 @@ Important boundary:
 - Expose operator-visible observability (at minimum structured logs).
 - Recover after process death from a transactional state store plus independent tracker,
   Git/filesystem, and provider observations; never reconstruct missing Symphony authority silently.
+- Let a local human start, attach, plan, steer, restart, and inspect a boardless WorkSession through
+  the same store and accepted authority used by tracker-origin work.
 
 ### 2.2 Non-Goals
 
@@ -121,13 +126,17 @@ Important boundary:
    - Launches the coding agent app-server client.
    - Streams agent updates back to the orchestrator.
 
-9. `Status Surface` (OPTIONAL)
-   - Presents human-readable runtime status (for example terminal output, dashboard, or other
-     operator-facing view).
+9. `Interactive WorkSession Application Service`
+    - Starts a boardless human-controlled WorkSession from an exact managed binding.
+    - Records plans, steering, and a read-only observation of a human-owned checkout.
+    - Uses the same state-store port while remaining independent of CLI rendering and tracker APIs.
 
-10. `Logging`
+10. `Status Surface`
+    - Presents the required manual WorkSession projection and MAY also present daemon runtime status
+      through a terminal, dashboard, or other operator-facing view.
 
-- Emits structured runtime logs to one or more configured sinks.
+11. `Logging`
+    - Emits structured runtime logs to one or more configured sinks.
 
 ### 3.2 Abstraction Levels
 
@@ -253,8 +262,8 @@ Fields (logical):
 
 #### 4.1.5 WorkSession
 
-One durable authoring trajectory. Tracker dispatch is the first implemented origin; interactive
-origin is part of the shared schema so a later manual controller does not require a second store.
+One durable authoring trajectory. Tracker dispatch and explicit local human initiation are the two
+implemented origins; both use this aggregate so manual control does not require a second store.
 
 Fields (logical):
 
@@ -1203,6 +1212,64 @@ retries, managed workspace phases, running/interrupted preparation, and pending 
 tracker comments, workpads, candidate files, and legacy receipts MAY help explain or cross-check the
 record but MUST NOT replace it.
 
+### 7.6 Manual Interactive Control
+
+The Node implementation exposes five local commands over the same `SymphonyStateStore` used by the
+daemon:
+
+```text
+symphony work start  --binding <absolute-path> --intent <text>
+symphony work attach --binding <absolute-path> --session <id> --expected-revision <n> --path <absolute-checkout>
+symphony work plan   --binding <absolute-path> --session <id> --expected-revision <n> --file <plan.md>
+symphony work steer  --binding <absolute-path> --session <id> --expected-revision <n> --message <text>
+symphony work status --binding <absolute-path> --session <id> [--json]
+```
+
+Every invocation MUST receive and re-resolve the same exact absolute operator binding. The binding
+names the private state root and accepted authority; a WorkSession ID identifies a record inside
+that store but is not a global state-store locator. The implementation MUST NOT add a binding
+registry, sidecar file, second database, or candidate-repository workflow path to compensate.
+
+`start` MUST require binding schema version 3 with non-null accepted governance, pin the exact
+product/context/binding/doctrine/policy references, derive the human controller from the local
+operating-system identity, and create an `interactive` WorkSession. It MUST NOT read or mutate a
+tracker, allocate a workspace, create an Attempt, launch an agent, invoke WCP, or begin delivery.
+Manual commands MUST fully validate the configured delivery authority but MUST NOT require an
+unused delivery secret to be present; no provider receives that secret during a record-only command.
+
+`attach` MUST first fence the expected revision and active human controller, then perform only
+read-only Git inspection with the binding's trusted Git executable and scrubbed Git environment. It
+MUST canonicalize a nested directory to its real repository root; verify the accepted origin host
+and owner/repository; record HEAD plus tracked, untracked, and ignored-change observations; and
+refuse symlink aliases, another repository, a conflicting active workspace claim, or overlap with
+state, managed-workspace, accepted-governance, or binding authority. The resulting session-level
+attachment has `ownership: human` and `removal_policy: never` and creates no Attempt or lease.
+Inspection MUST disable ambient Git configuration, hooks, fsmonitor, recursive submodules, and
+refuse repository-configured executable clean/smudge/process filters before status evaluation.
+
+`plan` MUST accept only a bounded regular non-symlink UTF-8 file containing exactly one `## Plan`
+section and one non-empty `## Acceptance criteria` list. It replaces the current typed plan and
+increments its version. The MVP retains the current plan, not superseded plan bodies; append-only
+steering and doctrine exceptions provide the durable decision history.
+
+`steer` MUST append one revision-fenced entry accepted by the active human controller. Text in the
+exact form `EXCEPTION GP-xx: <reason>` becomes a doctrine-linked exception; malformed
+`EXCEPTION...` text MUST be refused rather than silently stored as ordinary steering. The state
+store records the trusted application's accepted actor; the manual application service MUST prove
+that actor is its active human controller. A future tracker-origin structured human action has a
+separate authentication seam and MUST NOT impersonate the tracker controller.
+
+`status` is read-only and MUST return a versioned projection rather than a raw aggregate or database
+row. It MAY display the checkout path and intentional plan/decision text, but MUST omit runtime and
+workspace lease tokens, effect payloads, raw prompts, transcripts, environment values, and stored
+provider errors. Repeated collections MUST be bounded with total/truncation metadata. Dirty
+attached work is advisory. A clean observation is `protected` only when one passed proof matches
+both its recorded immutable HEAD and the digest of the current plan; otherwise it is `unproven`.
+
+These commands are a durable record/control surface for a human-driven session. They do not inject
+context into an already-running coding client, spawn a replacement client, hand control to a board,
+or broaden Symphony into a multi-repository program manager.
+
 ## 8. Polling, Scheduling, and Reconciliation
 
 ### 8.1 Poll Loop
@@ -2014,13 +2081,13 @@ RECOMMENDED snapshot error modes:
 - `timeout`
 - `unavailable`
 
-### 13.4 OPTIONAL Human-Readable Status Surface
+### 13.4 Status Surfaces
 
-A human-readable status surface (terminal output, dashboard, etc.) is OPTIONAL and
-implementation-defined.
-
-If present, it SHOULD draw from orchestrator state/metrics only and MUST NOT be REQUIRED for
-correctness.
+The manual WorkSession CLI status defined in Section 7.6 is REQUIRED for this implementation and is
+projected from durable state. A separate daemon runtime surface (terminal output, dashboard, etc.)
+is OPTIONAL and implementation-defined; if present, it SHOULD draw from orchestrator
+state/metrics. Neither surface may mutate authority merely by reading or be required for
+orchestration correctness.
 
 ### 13.5 Session Metrics and Token Accounting
 
@@ -3023,6 +3090,13 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 - CLI accepts `--binding path-to-deployment-binding.json` for managed Git and refuses combining it
   with a positional workflow
+- CLI exposes `work start|attach|plan|steer|status` exactly as Section 7.6 defines, requires the
+  same explicit absolute `--binding` on every invocation, and never constructs the daemon for a
+  manual command
+- manual writes use expected revisions and the local human controller; `status --json` returns the
+  versioned bounded projection and no authority token
+- manual start/attach/plan/steer/status survive independent process exit and state-store reopen;
+  attachment inspection is read-only and creates no Attempt or lease
 - managed Git refuses positional/default `WORKFLOW.md` authority
 - CLI accepts a positional workflow path argument (`path-to-WORKFLOW.md`)
 - CLI uses `./WORKFLOW.md` when no source is provided, for compatibility only
@@ -3076,6 +3150,9 @@ Use the same validation profiles as Section 17:
 - WorkSession aggregate with tracker/interactive origins, revisions, pinned inputs, decisions,
   session-level human attachments, attempts, runtime/workspace leases, durable retries,
   materialization/proof/delivery records, effect intents, integrity checks, migrations, and backup
+- Local manual WorkSession application and CLI with exact binding revalidation, revision/controller
+  fencing, bounded plan admission, non-removable read-only attachment observation, secret-free
+  status, restart continuity, and honest advisory/protected evidence posture
 - Issue tracker adapter with state-list + ID-refresh reads
 - Workspace manager with sanitized, collision-resistant per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)

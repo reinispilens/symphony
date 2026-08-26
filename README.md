@@ -19,7 +19,8 @@ product repository              Symphony operator
 profile + prompt @ Git SHA      deployment binding outside product
              └──────────────────┼────────┘
                                 ▼
-GitHub Project ──poll──▶ durable WorkSession + fenced Attempt
+GitHub Project ──poll──┐
+local human command ───┴──▶ durable WorkSession + optional fenced Attempt
                                 │
                                 ├── RepositoryDriver ─────▶ managed Git worktree
                                 ├── sandboxed preparation ▶ frozen dependencies
@@ -39,8 +40,9 @@ worktree lifecycle.
 `workspace.provider: harness` remains available only to drain existing consumers. New integrations
 use the implemented [`repository-driver boundary`](docs/repository-driver-boundary.md) and must not
 copy lifecycle machinery into target repositories. Accepted-governance resolution, lane-aware
-authoring, durable delivery, and exact WCP proof correlation are implemented here. The real
-Dyslexify journey and manual WorkSession commands remain separate acceptance gates.
+authoring, durable delivery, exact WCP proof correlation, and the five-command manual WorkSession
+surface are implemented here. The final accepted-governance repin and real Dyslexify journey remain
+separate estate acceptance gates.
 
 ## Requirements
 
@@ -138,6 +140,53 @@ no agent slot, and a change away from the accepted Symphony driver releases an a
 Repinning the daemon affects new WorkSessions; an existing WorkSession continues under the complete
 policy value it already recorded.
 
+## Human-controlled WorkSessions
+
+Manual control uses the same binding, SQLite store, WorkSession aggregate, revisions, doctrine,
+and evidence records as tracker-origin work. It does not create a board item or a second state
+system, and it does not start Codex. The human remains the orchestrator.
+
+```text
+explicit local command
+        +
+exact operator binding
+        │
+        ▼
+interactive WorkSession ──▶ attach existing human checkout
+        │                    ownership = human; removal = never
+        ├──▶ replace current plan
+        ├──▶ append steering/exception decisions
+        └──▶ read durable status after restart
+```
+
+Every invocation supplies the same absolute binding path. This is intentional: the binding names
+the private state root and exact accepted authority. A session ID selects a record inside that
+store; it is not a global locator, and Symphony maintains no binding registry.
+
+```bash
+SYMPHONY=/absolute/path/to/symphony/dist/cli.js
+BINDING=/absolute/operator/deployment-binding.json
+
+node "$SYMPHONY" work start  --binding "$BINDING" --intent "Finish the manual control surface"
+node "$SYMPHONY" work attach --binding "$BINDING" --session <id> --expected-revision <n> --path /absolute/checkout
+node "$SYMPHONY" work plan   --binding "$BINDING" --session <id> --expected-revision <n> --file plan.md
+node "$SYMPHONY" work steer  --binding "$BINDING" --session <id> --expected-revision <n> --message "Keep the product adapter thin"
+node "$SYMPHONY" work status --binding "$BINDING" --session <id>
+node "$SYMPHONY" work status --binding "$BINDING" --session <id> --json
+```
+
+The plan file is bounded UTF-8 Markdown with exactly one `## Plan` section and one
+`## Acceptance criteria` list. Each successful write returns the new revision; pass that revision
+to the next mutation. `steer` normally appends a steering entry. The exact form
+`EXCEPTION GP-xx: <reason>` records a doctrine-linked exception accepted by the local human
+controller.
+
+`attach` performs read-only Git inspection, canonicalizes a nested path to its repository root,
+checks the accepted origin identity, and records HEAD plus tracked, untracked, and ignored-change
+facts. It creates no Attempt or lease. Dirty attached work is reported as advisory; status calls a
+result protected only when a passed proof matches both the recorded immutable HEAD and the current
+plan digest. See [`docs/operations.md`](docs/operations.md) for state backup and recovery.
+
 The managed driver verifies that the accepted source checkout's `origin` host and owner/repository
 match the tracker-resolved hostname plus the product profile identity, resolves the configured full
 base ref once for the WorkSession's first managed allocation, and
@@ -226,9 +275,10 @@ runtime-quiescence checks complete.
 - [`docs/dyslexify-orchestration-handoff.md`](docs/dyslexify-orchestration-handoff.md) records the
   corrected ownership and planning lessons from the Dyslexify pilot.
 
-No HTTP server, dashboard, or manual WorkSession CLI is shipped yet. The Project is the current
-human control surface; the daemon also exposes an in-process, read-only runtime snapshot whose
-attempt and retry facts are projected from durable WorkSession state.
+No HTTP server or dashboard is shipped. Tracker-origin work remains controlled by the Project;
+boardless work uses the local five-command WorkSession surface. The daemon also exposes an
+in-process, read-only runtime snapshot whose attempt and retry facts are projected from durable
+WorkSession state.
 
 ## Current deployment boundary
 

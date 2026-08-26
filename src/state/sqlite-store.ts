@@ -393,6 +393,20 @@ function liveWorkspacePaths(document: WorkSessionDocument): readonly string[] {
   return paths;
 }
 
+function workspacePathsOverlap(left: string, right: string): boolean {
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  const inside = (relative: string) =>
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative));
+  return (
+    inside(path.relative(normalizedLeft, normalizedRight)) ||
+    inside(path.relative(normalizedRight, normalizedLeft))
+  );
+}
+
 function assertExpectedRevision(
   row: SessionRow,
   expectedRevision: number,
@@ -2380,7 +2394,9 @@ export class SqliteSymphonyStateStore implements SymphonyStateStore {
         ...liveWorkspacePaths(candidate),
       ];
       if (
-        claimedPaths.some((claimed) => path.resolve(claimed) === normalized)
+        claimedPaths.some((claimed) =>
+          workspacePathsOverlap(claimed, normalized),
+        )
       ) {
         throw new StateStoreError(
           "workspace_conflict",
@@ -2439,11 +2455,15 @@ export class SqliteSymphonyStateStore implements SymphonyStateStore {
         ]);
         for (const claimedPath of paths) {
           const normalized = path.resolve(claimedPath);
-          const owner = activeWorkspaceClaims.get(normalized);
-          if (owner !== undefined && owner !== document.id) {
+          const conflict = [...activeWorkspaceClaims].find(
+            ([existingPath, owner]) =>
+              owner !== document.id &&
+              workspacePathsOverlap(existingPath, normalized),
+          );
+          if (conflict !== undefined) {
             throw new StateStoreError(
               "state_corrupt",
-              `Active WorkSessions ${owner} and ${document.id} both claim workspace ${normalized}`,
+              `Active WorkSessions ${conflict[1]} and ${document.id} have overlapping workspace claims ${conflict[0]} and ${normalized}`,
             );
           }
           activeWorkspaceClaims.set(normalized, document.id);

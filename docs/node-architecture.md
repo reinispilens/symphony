@@ -1,7 +1,8 @@
 # Node Symphony architecture
 
-Status: accepted-governance composition, lane-aware orchestration, and durable managed delivery
-implemented; accepted-publication repin and consumer pilot pending, 2026-08-26
+Status: accepted-governance composition, lane-aware orchestration, durable managed delivery, and
+manual WorkSession control implemented; accepted-publication repin and consumer pilot pending,
+2026-08-27
 
 > [!IMPORTANT]
 > This document describes the managed Node implementation introduced with this change. The
@@ -22,7 +23,9 @@ product profile/context @ SHA       operator binding v3 │
                                    ▼
                          accepted configuration
                                    │
-GitHub Project ───────────────▶ Orchestrator ──▶ SymphonyStateStore (SQLite)
+GitHub Project ───────────────▶ Orchestrator ──┐
+                                               ├──▶ SymphonyStateStore (SQLite)
+local human ─▶ work CLI ─▶ manual service ─────┘    sessions · attempts · leases · decisions
                                 │                 attempts · leases · retries · outbox
                                 ├── RepositoryDriver ──▶ managed Git worktree
                                 ├── PreparationDriver ─▶ offline pnpm + read-only seed
@@ -53,20 +56,21 @@ The Elixir tree is a reference implementation only. The Node implementation is b
 
 ## Architectural boundaries
 
-| Boundary             | Owns                                                                                              | Must not own                                    |
-| -------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| `governance`         | strict accepted-manifest/policy parsing, exact Git blob verification, runtime policy projections  | normative doctrine prose, publication           |
-| `deployment`         | strict product/binding schemas, exact revisions, proof trust anchor, host/root/executable checks  | product proof meaning, workspace effects        |
-| `workflow`           | compatibility YAML loading/reload, typed defaults, strict prompt rendering                        | managed host authority, tracker payloads        |
-| `state`              | WorkSessions, pinned inputs/policy, plans/decisions, attempts, leases, sagas, effects, integrity  | tracker or Git truth, product semantics         |
-| `tracker`            | live issue/lane facts, normalization, provider errors, typed control operations, agent tools      | scheduling, policy publication, workspaces      |
-| `orchestrator`       | policy/fact intersection, authoring/delivery reconciliation, claims, retries, wake-up projections | provider payload inspection, product policy     |
-| `repository`         | workspace port, Git-worktree implementation, ownership checks, guarded cleanup, legacy routing    | dependency install, product proof               |
-| `preparation`        | package input admission, offline pnpm sandbox, private caches/index, policy-bound outcomes        | worktree ownership, product build/proof meaning |
-| `agent`              | Codex framing, managed launch/sandbox/cgroup, quiescence, private temp, scrubbed child env        | tracker/delivery credentials, board policy      |
-| `delivery`           | bounded materialization, durable saga, host-authenticated WCP correlation, guarded cleanup        | product proof semantics, lane publication       |
-| `observability`      | structured logs and snapshots projected from durable/runtime state                                | a second source of orchestration truth          |
-| CLI composition root | select binding or compatibility workflow, open state, bind ports/daemon, own signals              | multi-repository routing or product policy      |
+| Boundary             | Owns                                                                                              | Must not own                                         |
+| -------------------- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `governance`         | strict accepted-manifest/policy parsing, exact Git blob verification, runtime policy projections  | normative doctrine prose, publication                |
+| `deployment`         | strict product/binding schemas, exact revisions, proof trust anchor, host/root/executable checks  | product proof meaning, workspace effects             |
+| `workflow`           | compatibility YAML loading/reload, typed defaults, strict prompt rendering                        | managed host authority, tracker payloads             |
+| `state`              | WorkSessions, pinned inputs/policy, plans/decisions, attempts, leases, sagas, effects, integrity  | tracker or Git truth, product semantics              |
+| `tracker`            | live issue/lane facts, normalization, provider errors, typed control operations, agent tools      | scheduling, policy publication, workspaces           |
+| `orchestrator`       | policy/fact intersection, authoring/delivery reconciliation, claims, retries, wake-up projections | provider payload inspection, product policy          |
+| `repository`         | workspace port, Git-worktree implementation, ownership checks, guarded cleanup, legacy routing    | dependency install, product proof                    |
+| `preparation`        | package input admission, offline pnpm sandbox, private caches/index, policy-bound outcomes        | worktree ownership, product build/proof meaning      |
+| `agent`              | Codex framing, managed launch/sandbox/cgroup, quiescence, private temp, scrubbed child env        | tracker/delivery credentials, board policy           |
+| `delivery`           | bounded materialization, durable saga, host-authenticated WCP correlation, guarded cleanup        | product proof semantics, lane publication            |
+| `interactive`        | local start/attach/plan/steer/status, checkout observation, safe status projection                | tracker writes, agent execution, workspace ownership |
+| `observability`      | structured logs and snapshots projected from durable/runtime state                                | a second source of orchestration truth               |
+| CLI composition root | select binding or compatibility workflow, open state, bind ports/daemon, own signals              | multi-repository routing or product policy           |
 
 Dependencies point inward toward small contracts. The composition root binds one state-store,
 tracker, repository-driver, preparation-driver, agent-runner, clock, and logger implementation.
@@ -95,6 +99,30 @@ not move product tests, required-check policy, or domain semantics into the sche
 Managed startup validation fails loudly and the pinned binding never live-reloads. Compatibility
 workflow edits retain their last-known-good behavior, but positional `git-worktree` admission is
 refused.
+
+### Manual command
+
+Each short-lived `symphony work` invocation re-resolves one explicit absolute binding, opens its
+existing state store, performs one application operation, and closes the store. Start is the only
+operation allowed to create that database. Follow-up commands require the same binding because a
+WorkSession ID is scoped to a binding-owned store; there is no global registry.
+
+```text
+binding + local OS actor
+          ↓
+validate accepted authority
+          ↓
+open one state store
+          ↓
+start | attach | plan | steer | status
+          ↓
+close; no tracker/provider/agent call
+```
+
+`attach` is the only operation that observes a repository. It uses trusted read-only Git commands,
+records the canonical matching root and change facts, and creates no Attempt or cleanup authority.
+The transport-independent service owns controller/revision fencing; the CLI owns only argument
+parsing and human/JSON rendering.
 
 ### Poll tick
 
@@ -299,6 +327,9 @@ boundaries without external mutation.
 - Lane-aware reconciliation that separates authoring from delivery, retains session-pinned policy
   after a deployment repin, abandons an exact prior delivery before Rework, and transitions to Done
   only through a typed tracker effect after cleanup.
+- A transport-independent manual WorkSession service plus five local CLI commands that reuse the
+  same binding/state aggregate, keep attachments human-owned, fence every write, survive reopen,
+  and project bounded secret-free evidence status without tracker or agent execution.
 
 Gate: the complete `pnpm check` and `pnpm build` commands after the specification and operator docs
 are synchronized. The accepted publication and a real consumer journey remain external estate
