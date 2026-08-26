@@ -219,6 +219,18 @@ function parseConfiguration(
     source["deploymentBinding"],
     "document.configuration.deploymentBinding",
   );
+  const deliveryValue = source["deliveryGrant"];
+  const delivery =
+    deliveryValue === undefined || deliveryValue === null
+      ? null
+      : record(deliveryValue, "document.configuration.deliveryGrant");
+  const governingPolicy =
+    delivery === null
+      ? null
+      : record(
+          delivery["governingPolicy"],
+          "document.configuration.deliveryGrant.governingPolicy",
+        );
   return {
     productProfile: {
       repositoryIdentity: nonEmptyString(
@@ -281,6 +293,43 @@ function parseConfiguration(
         "document.configuration.deploymentBinding.digest",
       ),
     },
+    deliveryGrant:
+      delivery === null || governingPolicy === null
+        ? null
+        : {
+            authority: oneOf(
+              delivery["authority"],
+              "document.configuration.deliveryGrant.authority",
+              ["owner-gated", "full-in-scope"] as const,
+            ),
+            governingPolicy: {
+              repositoryIdentity: nonEmptyString(
+                governingPolicy["repositoryIdentity"],
+                "document.configuration.deliveryGrant.governingPolicy.repositoryIdentity",
+              ),
+              path: nonEmptyString(
+                governingPolicy["path"],
+                "document.configuration.deliveryGrant.governingPolicy.path",
+              ),
+              revision: nonEmptyString(
+                governingPolicy["revision"],
+                "document.configuration.deliveryGrant.governingPolicy.revision",
+              ),
+              digest: nonEmptyString(
+                governingPolicy["digest"],
+                "document.configuration.deliveryGrant.governingPolicy.digest",
+              ),
+            },
+            requiredChecks: array(
+              delivery["requiredChecks"],
+              "document.configuration.deliveryGrant.requiredChecks",
+            ).map((entry, index) =>
+              nonEmptyString(
+                entry,
+                `document.configuration.deliveryGrant.requiredChecks[${index}]`,
+              ),
+            ),
+          },
   };
 }
 
@@ -765,6 +814,41 @@ function parseMaterializations(
         source["inputManifestDigest"],
         `${path}.inputManifestDigest`,
       ),
+      inputManifest:
+        source["inputManifest"] === null ||
+        source["inputManifest"] === undefined
+          ? null
+          : array(source["inputManifest"], `${path}.inputManifest`).map(
+              (entry, entryIndex) => {
+                const entryPath = `${path}.inputManifest[${entryIndex}]`;
+                const item = record(entry, entryPath);
+                return {
+                  path: nonEmptyString(item["path"], `${entryPath}.path`),
+                  kind: oneOf(item["kind"], `${entryPath}.kind`, [
+                    "regular",
+                    "symlink",
+                  ] as const),
+                  mode: oneOf(item["mode"], `${entryPath}.mode`, [
+                    "100644",
+                    "100755",
+                    "120000",
+                  ] as const),
+                  size: integer(item["size"], `${entryPath}.size`, 0),
+                  contentDigest: nonEmptyString(
+                    item["contentDigest"],
+                    `${entryPath}.contentDigest`,
+                  ),
+                  blobSha: nonEmptyString(
+                    item["blobSha"],
+                    `${entryPath}.blobSha`,
+                  ),
+                  origin: oneOf(item["origin"], `${entryPath}.origin`, [
+                    "tracked",
+                    "untracked",
+                  ] as const),
+                };
+              },
+            ),
       treeSha: nullableString(source["treeSha"], `${path}.treeSha`),
       commitSha: nullableString(source["commitSha"], `${path}.commitSha`),
       lastError: nullableString(source["lastError"], `${path}.lastError`),
@@ -933,8 +1017,12 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
   }
 
   if (document.configuration !== null) {
-    const { productProfile, authoringContext, deploymentBinding } =
-      document.configuration;
+    const {
+      productProfile,
+      authoringContext,
+      deploymentBinding,
+      deliveryGrant,
+    } = document.configuration;
     if (
       productProfile.repositoryIdentity !== document.repositoryIdentity ||
       authoringContext.repositoryIdentity !== document.repositoryIdentity
@@ -966,6 +1054,47 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
       deploymentBinding.digest,
       "document.configuration.deploymentBinding.digest",
     );
+    if (deliveryGrant !== null) {
+      const policy = deliveryGrant.governingPolicy;
+      if (!policy.repositoryIdentity.toLowerCase().endsWith("/.github")) {
+        corrupt(
+          "document.configuration.deliveryGrant.governingPolicy.repositoryIdentity",
+          "must identify an owner or organization .github repository",
+        );
+      }
+      assertRepositoryRelativePath(
+        policy.path,
+        "document.configuration.deliveryGrant.governingPolicy.path",
+      );
+      assertGitSha(
+        policy.revision,
+        "document.configuration.deliveryGrant.governingPolicy.revision",
+      );
+      assertSha256(
+        policy.digest,
+        "document.configuration.deliveryGrant.governingPolicy.digest",
+      );
+      if (deliveryGrant.requiredChecks.length === 0) {
+        corrupt(
+          "document.configuration.deliveryGrant.requiredChecks",
+          "must contain at least one required check",
+        );
+      }
+      assertUnique(
+        deliveryGrant.requiredChecks.map((entry) => entry.toLowerCase()),
+        "document.configuration.deliveryGrant.requiredChecks",
+        "case-insensitive check name",
+      );
+      if (
+        JSON.stringify(deliveryGrant.requiredChecks) !==
+        JSON.stringify([...deliveryGrant.requiredChecks].sort())
+      ) {
+        corrupt(
+          "document.configuration.deliveryGrant.requiredChecks",
+          "must be ordered by check name",
+        );
+      }
+    }
     assertUnique(
       authoringContext.entries.map((entry) => entry.path),
       "document.configuration.authoringContext.entries",
@@ -1461,11 +1590,46 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
       "commit_written",
       "branch_updated",
     ].indexOf(materialization.phase);
-    if (phaseRank >= 1 && materialization.inputManifestDigest === null) {
+    if (
+      phaseRank >= 1 &&
+      (materialization.inputManifestDigest === null ||
+        materialization.inputManifest === null)
+    ) {
       corrupt(
-        `${path}.inputManifestDigest`,
+        `${path}.inputManifest`,
         "must be present after the snapshot is recorded",
       );
+    }
+    if (materialization.inputManifest !== null) {
+      assertUnique(
+        materialization.inputManifest.map((entry) => entry.path),
+        `${path}.inputManifest`,
+        "input path",
+      );
+      const orderedPaths = materialization.inputManifest.map(
+        (entry) => entry.path,
+      );
+      if (
+        JSON.stringify(orderedPaths) !==
+        JSON.stringify([...orderedPaths].sort())
+      ) {
+        corrupt(`${path}.inputManifest`, "must be ordered by path");
+      }
+      for (const [
+        entryIndex,
+        entry,
+      ] of materialization.inputManifest.entries()) {
+        const entryPath = `${path}.inputManifest[${entryIndex}]`;
+        assertRepositoryRelativePath(entry.path, `${entryPath}.path`);
+        assertSha256(entry.contentDigest, `${entryPath}.contentDigest`);
+        assertGitSha(entry.blobSha, `${entryPath}.blobSha`);
+        if (entry.kind === "symlink" && entry.mode !== "120000") {
+          corrupt(`${entryPath}.mode`, "must be 120000 for a symlink");
+        }
+        if (entry.kind === "regular" && entry.mode === "120000") {
+          corrupt(`${entryPath}.mode`, "must be a regular-file mode");
+        }
+      }
     }
     if (phaseRank >= 2 && materialization.treeSha === null) {
       corrupt(`${path}.treeSha`, "must be present after the tree is written");
@@ -1515,6 +1679,54 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
     } else {
       timestamp(proof.observedAt, `${path}.observedAt`);
     }
+  }
+
+  const historicalMaterializations = new Set<string>();
+  for (const [index, delivery] of document.deliveryHistory.entries()) {
+    const path = `document.deliveryHistory[${index}]`;
+    if (
+      delivery.phase !== "completed" &&
+      !(
+        delivery.phase === "refused" &&
+        (delivery.cleanupStatus === "completed" ||
+          delivery.cleanupStatus === "retained")
+      )
+    ) {
+      corrupt(
+        `${path}.phase`,
+        "must be completed or refused with resolved cleanup before archival",
+      );
+    }
+    if (
+      delivery.materializationId !== null &&
+      historicalMaterializations.has(delivery.materializationId)
+    ) {
+      corrupt(
+        `${path}.materializationId`,
+        "must not duplicate another historical delivery",
+      );
+    }
+    if (delivery.materializationId !== null) {
+      historicalMaterializations.add(delivery.materializationId);
+    }
+    // Reuse the complete current-delivery invariant set without maintaining a
+    // second, weaker validator for archived evidence.
+    assertDocumentInvariants({
+      ...document,
+      deliveryHistory: [],
+      delivery,
+    });
+  }
+
+  if (
+    document.delivery?.materializationId !== null &&
+    document.delivery?.materializationId !== undefined &&
+    historicalMaterializations.has(document.delivery.materializationId)
+  ) {
+    corrupt(
+      "document.delivery.materializationId",
+      "must not duplicate a historical delivery",
+    );
   }
 
   if (document.delivery !== null) {
@@ -1567,6 +1779,11 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
     }
     if (delivery.phase === "refused" && delivery.lastError === null) {
       corrupt("document.delivery.lastError", "must explain a refusal");
+    } else if (delivery.phase !== "refused" && delivery.lastError !== null) {
+      corrupt(
+        "document.delivery.lastError",
+        "must be null unless delivery is refused",
+      );
     }
     assertUnique(
       delivery.requiredChecks.map((check) => check.name),
@@ -1590,6 +1807,89 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
         corrupt(`${path}.observedAt`, "must be present for a terminal check");
       } else {
         timestamp(check.observedAt, `${path}.observedAt`);
+      }
+    }
+    const ordinaryPhases = [
+      "intent_recorded",
+      "push_pending",
+      "pushed",
+      "pull_request_pending",
+      "pull_request_open",
+      "checks_pending",
+      "review_pending",
+      "merge_pending",
+      "merged",
+      "cleanup_pending",
+      "completed",
+    ] as const;
+    const phaseRank = ordinaryPhases.indexOf(
+      delivery.phase as (typeof ordinaryPhases)[number],
+    );
+    if (phaseRank >= 0) {
+      if (
+        delivery.materializationId === null ||
+        delivery.branch === null ||
+        delivery.immutableHeadSha === null
+      ) {
+        corrupt(
+          "document.delivery",
+          "ordinary delivery must bind a materialization, branch, and immutable head",
+        );
+      }
+      if (
+        phaseRank >= ordinaryPhases.indexOf("pushed") &&
+        delivery.remoteHeadSha !== delivery.immutableHeadSha
+      ) {
+        corrupt(
+          "document.delivery.remoteHeadSha",
+          "must equal the immutable head after the exact push is observed",
+        );
+      }
+      if (
+        phaseRank >= ordinaryPhases.indexOf("pull_request_open") &&
+        delivery.pullRequest === null
+      ) {
+        corrupt(
+          "document.delivery.pullRequest",
+          "must be present after the pull request is observed",
+        );
+      }
+      if (
+        phaseRank >= ordinaryPhases.indexOf("review_pending") &&
+        delivery.requiredChecks.some((check) => check.status !== "passed")
+      ) {
+        corrupt(
+          "document.delivery.requiredChecks",
+          "must all pass before review or merge",
+        );
+      }
+      if (
+        phaseRank >= ordinaryPhases.indexOf("merged") &&
+        delivery.mergeSha === null
+      ) {
+        corrupt(
+          "document.delivery.mergeSha",
+          "must be present after merge is observed",
+        );
+      }
+      if (
+        delivery.phase === "completed" &&
+        delivery.cleanupStatus !== "completed" &&
+        delivery.cleanupStatus !== "retained"
+      ) {
+        corrupt(
+          "document.delivery.cleanupStatus",
+          "must record completed or deliberately retained cleanup",
+        );
+      }
+      if (
+        phaseRank >= ordinaryPhases.indexOf("cleanup_pending") &&
+        delivery.releaseIntentId === null
+      ) {
+        corrupt(
+          "document.delivery.releaseIntentId",
+          "must identify the remote-branch release effect during cleanup",
+        );
       }
     }
   }
@@ -1637,6 +1937,21 @@ export function parseWorkSessionDocument(source: string): WorkSessionDocument {
     retry: parseRetry(value["retry"]),
     materializations: parseMaterializations(value["materializations"]),
     proof: parseProof(value["proof"]),
+    deliveryHistory:
+      value["deliveryHistory"] === undefined
+        ? []
+        : array(value["deliveryHistory"], "document.deliveryHistory").map(
+            (entry, index) => {
+              const delivery = parseDelivery(entry);
+              if (delivery === null) {
+                corrupt(
+                  `document.deliveryHistory[${index}]`,
+                  "must contain a delivery object",
+                );
+              }
+              return delivery;
+            },
+          ),
     delivery: parseDelivery(value["delivery"]),
     createdAt: nonEmptyString(value["createdAt"], "document.createdAt"),
     updatedAt: nonEmptyString(value["updatedAt"], "document.updatedAt"),

@@ -2,7 +2,10 @@ import type { JsonObject } from "../shared/json.js";
 import type {
   AppendDecisionInput,
   AttachHumanWorkspaceInput,
+  BeginDeliveryInput,
+  BeginMaterializationInput,
   BeginManagedWorkspaceInput,
+  BegunMaterialization,
   BegunManagedWorkspace,
   EffectIntent,
   ExpiredRuntimeLeaseCandidate,
@@ -10,6 +13,7 @@ import type {
   FinishAttemptInput,
   FinishPreparationInput,
   RecordWorkspaceInput,
+  RecordProofInput,
   ReplacePlanInput,
   RenewRuntimeLeaseInput,
   RuntimeCorrelationInput,
@@ -20,6 +24,8 @@ import type {
   StartPreparationInput,
   StartTrackerSessionInput,
   TransitionManagedWorkspaceInput,
+  TransitionDeliveryInput,
+  TransitionMaterializationInput,
   WorkSessionSnapshot,
 } from "./model.js";
 
@@ -84,6 +90,13 @@ export interface SymphonyStateStore {
   startPreparation(input: StartPreparationInput): WorkSessionSnapshot;
   finishPreparation(input: FinishPreparationInput): WorkSessionSnapshot;
   finishAttempt(input: FinishAttemptInput): WorkSessionSnapshot;
+  beginMaterialization(input: BeginMaterializationInput): BegunMaterialization;
+  transitionMaterialization(
+    input: TransitionMaterializationInput,
+  ): WorkSessionSnapshot;
+  beginDelivery(input: BeginDeliveryInput): WorkSessionSnapshot;
+  transitionDelivery(input: TransitionDeliveryInput): WorkSessionSnapshot;
+  recordProof(input: RecordProofInput): WorkSessionSnapshot;
   scheduleRetry(input: ScheduleRetryInput): WorkSessionSnapshot;
   clearRetry(
     sessionId: string,

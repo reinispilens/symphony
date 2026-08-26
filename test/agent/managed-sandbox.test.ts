@@ -144,9 +144,11 @@ describe("managed Codex sandbox", () => {
               id: "widgets-local",
               digest: "sha256:binding",
             },
+            deliveryGrant: null,
           },
           codexExecutable: path.join(fixture.bin, "codex"),
           gitExecutable: "/usr/bin/git",
+          deliveryProvider: null,
           preparation: {
             nodeExecutable: process.execPath,
             pnpmEntryPoint: path.join(fixture.bin, "pnpm.mjs"),

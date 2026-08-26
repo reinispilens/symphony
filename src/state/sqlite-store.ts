@@ -17,7 +17,10 @@ import {
   type AppendDecisionInput,
   type AttemptRecord,
   type AttachHumanWorkspaceInput,
+  type BeginDeliveryInput,
+  type BeginMaterializationInput,
   type BeginManagedWorkspaceInput,
+  type BegunMaterialization,
   type BegunManagedWorkspace,
   type EffectIntent,
   type ExpiredRuntimeLeaseCandidate,
@@ -26,6 +29,7 @@ import {
   type FinishPreparationInput,
   type ManagedWorkspaceLease,
   type RecordWorkspaceInput,
+  type RecordProofInput,
   type ReplacePlanInput,
   type RenewRuntimeLeaseInput,
   type RetryIntent,
@@ -38,6 +42,8 @@ import {
   type StartPreparationInput,
   type StartTrackerSessionInput,
   type TransitionManagedWorkspaceInput,
+  type TransitionDeliveryInput,
+  type TransitionMaterializationInput,
   type WorkSessionDocument,
   type WorkSessionSnapshot,
   type WorkspaceLease,
@@ -339,6 +345,7 @@ function migrateV1WorkSessionDocument(source: string): WorkSessionDocument {
       attempts,
       materializations: [],
       proof,
+      deliveryHistory: [],
       delivery,
     }),
   );
@@ -513,6 +520,58 @@ function managedTransitionAllowed(
     case "removed":
       return false;
   }
+}
+
+function materializationTransitionAllowed(
+  from: TransitionMaterializationInput["expectedPhases"][number],
+  to: TransitionMaterializationInput["phase"],
+): boolean {
+  if (from === to) return true;
+  if (to === "refused") return from !== "branch_updated" && from !== "refused";
+  switch (from) {
+    case "intent_recorded":
+      return to === "snapshot_recorded";
+    case "snapshot_recorded":
+      return to === "tree_written";
+    case "tree_written":
+      return to === "commit_written";
+    case "commit_written":
+      return to === "branch_updated";
+    case "branch_updated":
+    case "refused":
+      return false;
+  }
+}
+
+function deliveryTransitionAllowed(
+  from: TransitionDeliveryInput["expectedPhases"][number],
+  to: TransitionDeliveryInput["phase"],
+): boolean {
+  if (from === to) return true;
+  if (to === "refused") return from !== "completed" && from !== "refused";
+  if (
+    (from === "checks_pending" || from === "review_pending") &&
+    to === "merged"
+  ) {
+    return true;
+  }
+  const sequence = [
+    "intent_recorded",
+    "push_pending",
+    "pushed",
+    "pull_request_pending",
+    "pull_request_open",
+    "checks_pending",
+    "review_pending",
+    "merge_pending",
+    "merged",
+    "cleanup_pending",
+    "completed",
+  ] as const;
+  return (
+    sequence.indexOf(to as (typeof sequence)[number]) ===
+    sequence.indexOf(from as (typeof sequence)[number]) + 1
+  );
 }
 
 /**
@@ -749,6 +808,7 @@ export class SqliteSymphonyStateStore implements SymphonyStateStore {
         retry: null,
         materializations: [],
         proof: [],
+        deliveryHistory: [],
         delivery: null,
         createdAt: input.now,
         updatedAt: input.now,
@@ -789,6 +849,7 @@ export class SqliteSymphonyStateStore implements SymphonyStateStore {
         retry: null,
         materializations: [],
         proof: [],
+        deliveryHistory: [],
         delivery: null,
         createdAt: input.now,
         updatedAt: input.now,
@@ -1652,6 +1713,411 @@ export class SqliteSymphonyStateStore implements SymphonyStateStore {
         },
         input.now,
       );
+    });
+  }
+
+  beginMaterialization(input: BeginMaterializationInput): BegunMaterialization {
+    timestamp(input.now, "materialization start time");
+    return this.#transaction(() => {
+      const row = this.#requireRow(input.sessionId);
+      const document = this.#decode(row);
+      assertControllerGeneration(
+        document,
+        input.controllerGeneration,
+        "begin materialization for",
+      );
+      noActiveLease(document, "begin materialization for");
+      if (document.configuration?.deliveryGrant == null) {
+        throw new StateStoreError(
+          "controller_conflict",
+          `WorkSession ${document.id} has no accepted product-owner delivery grant`,
+        );
+      }
+      if (
+        document.delivery !== null &&
+        document.delivery.phase !== "completed" &&
+        !(
+          document.delivery.phase === "refused" &&
+          (document.delivery.cleanupStatus === "completed" ||
+            document.delivery.cleanupStatus === "retained")
+        )
+      ) {
+        throw new StateStoreError(
+          "stale_fence",
+          `WorkSession ${document.id} already has unresolved delivery state`,
+        );
+      }
+      const attempt = document.attempts.find(
+        (candidate) => candidate.id === input.attemptId,
+      );
+      const lease = attempt?.workspaceLease;
+      if (
+        attempt === undefined ||
+        lease?.mode !== "managed" ||
+        lease.leaseToken !== input.workspaceLeaseToken ||
+        lease.controllerGeneration !== input.controllerGeneration ||
+        lease.phase !== "ready" ||
+        attempt.runtimeLease.status === "active"
+      ) {
+        throw new StateStoreError(
+          "stale_fence",
+          `Attempt ${input.attemptId} does not hold a quiescent ready managed-workspace lease`,
+        );
+      }
+      if (attempt.status !== "completed" && attempt.status !== "released") {
+        throw new StateStoreError(
+          "stale_fence",
+          `Attempt ${attempt.id} ended as ${attempt.status}; its bytes are not deliverable`,
+        );
+      }
+      if (
+        lease.branch !== input.branch ||
+        lease.baseSha !== input.parentSha ||
+        input.parentSha !== input.expectedOldSha
+      ) {
+        throw new StateStoreError(
+          "input_conflict",
+          `Materialization facts do not match managed lease ${lease.leaseToken}`,
+        );
+      }
+      const existing = document.materializations.find(
+        (candidate) =>
+          candidate.attemptId === input.attemptId &&
+          candidate.workspaceLeaseToken === input.workspaceLeaseToken &&
+          candidate.phase !== "refused",
+      );
+      const immutableInput = {
+        attemptId: input.attemptId,
+        workspaceLeaseToken: input.workspaceLeaseToken,
+        controllerGeneration: input.controllerGeneration,
+        parentSha: input.parentSha,
+        branch: input.branch,
+        expectedOldSha: input.expectedOldSha,
+        inclusionPolicyDigest: input.inclusionPolicyDigest,
+      };
+      if (existing !== undefined) {
+        if (
+          !sameJson(
+            {
+              attemptId: existing.attemptId,
+              workspaceLeaseToken: existing.workspaceLeaseToken,
+              controllerGeneration: existing.controllerGeneration,
+              parentSha: existing.parentSha,
+              branch: existing.branch,
+              expectedOldSha: existing.expectedOldSha,
+              inclusionPolicyDigest: existing.inclusionPolicyDigest,
+            },
+            immutableInput,
+          )
+        ) {
+          throw new StateStoreError(
+            "input_conflict",
+            `Attempt ${attempt.id} already has a different materialization intent`,
+          );
+        }
+        return {
+          session: snapshot(document, row.revision),
+          materializationId: existing.id,
+        };
+      }
+      const materializationId = randomUUID();
+      const updated: WorkSessionDocument = {
+        ...document,
+        materializations: [
+          ...document.materializations,
+          {
+            id: materializationId,
+            ...immutableInput,
+            phase: "intent_recorded",
+            inputManifestDigest: null,
+            inputManifest: null,
+            treeSha: null,
+            commitSha: null,
+            lastError: null,
+            startedAt: input.now,
+            updatedAt: input.now,
+          },
+        ],
+        updatedAt: input.now,
+      };
+      return {
+        session: this.#write(row, updated),
+        materializationId,
+      };
+    });
+  }
+
+  transitionMaterialization(
+    input: TransitionMaterializationInput,
+  ): WorkSessionSnapshot {
+    timestamp(input.now, "materialization transition time");
+    return this.#mutate(input.sessionId, (document) => {
+      assertControllerGeneration(
+        document,
+        input.controllerGeneration,
+        "transition materialization for",
+      );
+      noActiveLease(document, "transition materialization for");
+      const index = document.materializations.findIndex(
+        (candidate) => candidate.id === input.materializationId,
+      );
+      const current = document.materializations[index];
+      if (current === undefined) {
+        throw new StateStoreError(
+          "state_not_found",
+          `Materialization ${input.materializationId} does not exist`,
+        );
+      }
+      if (current.controllerGeneration !== input.controllerGeneration) {
+        throw new StateStoreError(
+          "stale_fence",
+          `Materialization ${current.id} belongs to controller generation ${current.controllerGeneration}`,
+        );
+      }
+      if (!input.expectedPhases.includes(current.phase)) {
+        if (current.phase === input.phase) return document;
+        throw new StateStoreError(
+          "stale_fence",
+          `Materialization ${current.id} is ${current.phase}, not one of ${input.expectedPhases.join(", ")}`,
+        );
+      }
+      if (!materializationTransitionAllowed(current.phase, input.phase)) {
+        throw new StateStoreError(
+          "stale_fence",
+          `Materialization cannot transition from ${current.phase} to ${input.phase}`,
+        );
+      }
+      const next = {
+        ...current,
+        phase: input.phase,
+        ...(input.phase === "snapshot_recorded"
+          ? {
+              inputManifestDigest: input.inputManifestDigest,
+              inputManifest: [...input.inputManifest],
+            }
+          : {}),
+        ...(input.phase === "tree_written" ? { treeSha: input.treeSha } : {}),
+        ...(input.phase === "commit_written"
+          ? { commitSha: input.commitSha }
+          : {}),
+        lastError: input.phase === "refused" ? input.error : null,
+        updatedAt: input.now,
+      };
+      const materializations = [...document.materializations];
+      materializations[index] = next;
+      return { ...document, materializations, updatedAt: input.now };
+    });
+  }
+
+  beginDelivery(input: BeginDeliveryInput): WorkSessionSnapshot {
+    timestamp(input.now, "delivery start time");
+    return this.#mutate(input.sessionId, (document) => {
+      assertControllerGeneration(
+        document,
+        input.controllerGeneration,
+        "begin delivery for",
+      );
+      noActiveLease(document, "begin delivery for");
+      const grant = document.configuration?.deliveryGrant;
+      if (grant === null || grant === undefined) {
+        throw new StateStoreError(
+          "controller_conflict",
+          `WorkSession ${document.id} has no accepted product-owner delivery grant`,
+        );
+      }
+      const materialization = document.materializations.find(
+        (candidate) => candidate.id === input.materializationId,
+      );
+      if (
+        materialization?.phase !== "branch_updated" ||
+        materialization.commitSha === null
+      ) {
+        throw new StateStoreError(
+          "stale_fence",
+          `Materialization ${input.materializationId} is not an immutable branch head`,
+        );
+      }
+      let deliveryHistory = document.deliveryHistory;
+      if (document.delivery !== null) {
+        if (
+          document.delivery.materializationId === input.materializationId &&
+          document.delivery.expectedRemoteHeadSha ===
+            input.expectedRemoteHeadSha
+        ) {
+          return document;
+        }
+        if (
+          document.delivery.phase !== "completed" &&
+          !(
+            document.delivery.phase === "refused" &&
+            (document.delivery.cleanupStatus === "completed" ||
+              document.delivery.cleanupStatus === "retained")
+          )
+        ) {
+          throw new StateStoreError(
+            "input_conflict",
+            `WorkSession ${document.id} already has a nonterminal delivery intent`,
+          );
+        }
+        deliveryHistory = [...deliveryHistory, document.delivery];
+      }
+      return {
+        ...document,
+        deliveryHistory,
+        delivery: {
+          phase: "intent_recorded",
+          materializationId: materialization.id,
+          branch: materialization.branch,
+          pullRequest: null,
+          immutableHeadSha: materialization.commitSha,
+          expectedRemoteHeadSha: input.expectedRemoteHeadSha,
+          remoteHeadSha: null,
+          requiredChecks: grant.requiredChecks.map((name) => ({
+            name,
+            headSha: materialization.commitSha!,
+            checkRunId: null,
+            workflowRunId: null,
+            status: "pending" as const,
+            observedAt: null,
+          })),
+          mergeSha: null,
+          cleanupStatus: "not_started",
+          releaseIntentId: null,
+          lastError: null,
+          startedAt: input.now,
+          updatedAt: input.now,
+        },
+        updatedAt: input.now,
+      };
+    });
+  }
+
+  transitionDelivery(input: TransitionDeliveryInput): WorkSessionSnapshot {
+    timestamp(input.now, "delivery transition time");
+    return this.#mutate(input.sessionId, (document) => {
+      assertControllerGeneration(
+        document,
+        input.controllerGeneration,
+        "transition delivery for",
+      );
+      noActiveLease(document, "transition delivery for");
+      const current = document.delivery;
+      if (current === null) {
+        throw new StateStoreError(
+          "state_not_found",
+          `WorkSession ${document.id} has no delivery intent`,
+        );
+      }
+      if (!input.expectedPhases.includes(current.phase)) {
+        if (current.phase === input.phase) return document;
+        throw new StateStoreError(
+          "stale_fence",
+          `Delivery is ${current.phase}, not one of ${input.expectedPhases.join(", ")}`,
+        );
+      }
+      if (!deliveryTransitionAllowed(current.phase, input.phase)) {
+        throw new StateStoreError(
+          "stale_fence",
+          `Delivery cannot transition from ${current.phase} to ${input.phase}`,
+        );
+      }
+      if (
+        input.phase === "merge_pending" &&
+        document.configuration?.deliveryGrant?.authority !== "full-in-scope"
+      ) {
+        throw new StateStoreError(
+          "controller_conflict",
+          "Only a pinned full-in-scope product-owner grant may authorize a Symphony merge intent",
+        );
+      }
+      const delivery = {
+        ...current,
+        phase: input.phase,
+        ...(input.pullRequest === undefined
+          ? {}
+          : { pullRequest: input.pullRequest }),
+        ...(input.remoteHeadSha === undefined
+          ? {}
+          : { remoteHeadSha: input.remoteHeadSha }),
+        ...(input.requiredChecks === undefined
+          ? {}
+          : { requiredChecks: [...input.requiredChecks] }),
+        ...(input.mergeSha === undefined ? {} : { mergeSha: input.mergeSha }),
+        ...(input.cleanupStatus === undefined
+          ? {}
+          : { cleanupStatus: input.cleanupStatus }),
+        ...(input.releaseIntentId === undefined
+          ? {}
+          : { releaseIntentId: input.releaseIntentId }),
+        lastError: input.phase === "refused" ? (input.error ?? null) : null,
+        updatedAt: input.now,
+      };
+      return { ...document, delivery, updatedAt: input.now };
+    });
+  }
+
+  recordProof(input: RecordProofInput): WorkSessionSnapshot {
+    timestamp(input.now, "proof observation time");
+    return this.#mutate(input.sessionId, (document) => {
+      assertControllerGeneration(
+        document,
+        input.controllerGeneration,
+        "record proof for",
+      );
+      const head = document.delivery?.immutableHeadSha;
+      const grant = document.configuration?.deliveryGrant;
+      if (
+        head === null ||
+        head === undefined ||
+        input.proof.sourceSha !== head ||
+        input.proof.checkName === null ||
+        grant === null ||
+        grant === undefined ||
+        !grant.requiredChecks.includes(input.proof.checkName)
+      ) {
+        throw new StateStoreError(
+          "input_conflict",
+          "Proof observation is not bound to this delivery head and accepted required-check grant",
+        );
+      }
+      const index = document.proof.findIndex(
+        (candidate) => candidate.id === input.proof.id,
+      );
+      if (index >= 0) {
+        const current = document.proof[index]!;
+        const immutable = (proof: typeof current) => ({
+          id: proof.id,
+          checkName: proof.checkName,
+          checkRunId: proof.checkRunId,
+          workflowRunId: proof.workflowRunId,
+          sourceSha: proof.sourceSha,
+          planDigest: proof.planDigest,
+          adapterDigest: proof.adapterDigest,
+          policyDigest: proof.policyDigest,
+          recordedAt: proof.recordedAt,
+        });
+        if (!sameJson(immutable(current), immutable(input.proof))) {
+          throw new StateStoreError(
+            "input_conflict",
+            `Proof ${input.proof.id} already binds different immutable evidence`,
+          );
+        }
+        if (sameJson(current, input.proof)) return document;
+        if (current.status !== "pending") {
+          throw new StateStoreError(
+            "stale_fence",
+            `Proof ${input.proof.id} is already terminal`,
+          );
+        }
+        const proof = [...document.proof];
+        proof[index] = input.proof;
+        return { ...document, proof, updatedAt: input.now };
+      }
+      return {
+        ...document,
+        proof: [...document.proof, input.proof],
+        updatedAt: input.now,
+      };
     });
   }
 

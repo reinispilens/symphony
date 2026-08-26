@@ -45,6 +45,25 @@ function acceptedConfiguration() {
       id: "personal-symphony",
       digest: "sha256:binding",
     },
+    deliveryGrant: null,
+  } as const;
+}
+
+function acceptedDeliveryConfiguration(
+  authority: "owner-gated" | "full-in-scope" = "owner-gated",
+) {
+  return {
+    ...acceptedConfiguration(),
+    deliveryGrant: {
+      authority,
+      governingPolicy: {
+        repositoryIdentity: "reinispilens/.github",
+        path: "agent-system/delivery-policy.json",
+        revision: "b".repeat(40),
+        digest: "sha256:delivery-policy",
+      },
+      requiredChecks: ["proof / Protected final"],
+    },
   } as const;
 }
 
@@ -960,6 +979,418 @@ describe("SqliteSymphonyStateStore", () => {
       });
       expect(retried.session.retry).toBeNull();
       expect(retried.session.attempts).toHaveLength(2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("durably fences materialization, proof, and owner-gated delivery", () => {
+    const store = SqliteSymphonyStateStore.openInMemory();
+    try {
+      const session = store.getOrCreateTrackerSession({
+        ...trackerInput(),
+        configuration: acceptedDeliveryConfiguration(),
+      });
+      const started = startAttempt(store, session.id);
+      const workspace = store.beginManagedWorkspace({
+        sessionId: session.id,
+        attemptId: started.attemptId,
+        runtimeLeaseToken: started.runtimeLeaseToken,
+        controllerGeneration: started.controllerGeneration,
+        path: "/workspaces/SYM-delivery",
+        workspaceKey: "SYM-delivery",
+        repositoryIdentity: "reinispilens/symphony",
+        profileDigest: acceptedDeliveryConfiguration().productProfile.digest,
+        sourceRoot: "/repositories/symphony",
+        workspaceRoot: "/workspaces",
+        baseRef: "refs/heads/main",
+        baseSha: "a".repeat(40),
+        branch: "symphony/SYM-delivery",
+        freshAttemptGeneration: null,
+        now: "2026-08-25T10:00:01.000Z",
+      });
+      store.transitionManagedWorkspace({
+        sessionId: session.id,
+        attemptId: started.attemptId,
+        workspaceLeaseToken: workspace.workspaceLeaseToken,
+        controllerGeneration: started.controllerGeneration,
+        runtimeLeaseToken: started.runtimeLeaseToken,
+        expectedPhases: ["allocating"],
+        phase: "provisioned",
+        error: null,
+        now: "2026-08-25T10:00:02.000Z",
+      });
+      store.transitionManagedWorkspace({
+        sessionId: session.id,
+        attemptId: started.attemptId,
+        workspaceLeaseToken: workspace.workspaceLeaseToken,
+        controllerGeneration: started.controllerGeneration,
+        runtimeLeaseToken: started.runtimeLeaseToken,
+        expectedPhases: ["provisioned"],
+        phase: "ready",
+        error: null,
+        now: "2026-08-25T10:00:03.000Z",
+      });
+
+      expect(() =>
+        store.beginMaterialization({
+          sessionId: session.id,
+          attemptId: started.attemptId,
+          workspaceLeaseToken: workspace.workspaceLeaseToken,
+          controllerGeneration: started.controllerGeneration,
+          parentSha: "a".repeat(40),
+          branch: "symphony/SYM-delivery",
+          expectedOldSha: "a".repeat(40),
+          inclusionPolicyDigest: "sha256:materialization-v1",
+          now: "2026-08-25T10:00:03.500Z",
+        }),
+      ).toThrowError(expect.objectContaining({ code: "active_runtime_lease" }));
+
+      store.finishAttempt({
+        sessionId: session.id,
+        attemptId: started.attemptId,
+        runtimeLeaseToken: started.runtimeLeaseToken,
+        controllerGeneration: started.controllerGeneration,
+        status: "completed",
+        error: null,
+        now: "2026-08-25T10:00:04.000Z",
+      });
+      const begun = store.beginMaterialization({
+        sessionId: session.id,
+        attemptId: started.attemptId,
+        workspaceLeaseToken: workspace.workspaceLeaseToken,
+        controllerGeneration: started.controllerGeneration,
+        parentSha: "a".repeat(40),
+        branch: "symphony/SYM-delivery",
+        expectedOldSha: "a".repeat(40),
+        inclusionPolicyDigest: "sha256:materialization-v1",
+        now: "2026-08-25T10:00:05.000Z",
+      });
+      expect(
+        store.beginMaterialization({
+          sessionId: session.id,
+          attemptId: started.attemptId,
+          workspaceLeaseToken: workspace.workspaceLeaseToken,
+          controllerGeneration: started.controllerGeneration,
+          parentSha: "a".repeat(40),
+          branch: "symphony/SYM-delivery",
+          expectedOldSha: "a".repeat(40),
+          inclusionPolicyDigest: "sha256:materialization-v1",
+          now: "2026-08-25T10:00:06.000Z",
+        }).materializationId,
+      ).toBe(begun.materializationId);
+      store.transitionMaterialization({
+        sessionId: session.id,
+        materializationId: begun.materializationId,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["intent_recorded"],
+        phase: "snapshot_recorded",
+        inputManifestDigest: "sha256:manifest",
+        inputManifest: [],
+        now: "2026-08-25T10:00:06.000Z",
+      });
+      store.transitionMaterialization({
+        sessionId: session.id,
+        materializationId: begun.materializationId,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["snapshot_recorded"],
+        phase: "tree_written",
+        treeSha: "c".repeat(40),
+        now: "2026-08-25T10:00:07.000Z",
+      });
+      store.transitionMaterialization({
+        sessionId: session.id,
+        materializationId: begun.materializationId,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["tree_written"],
+        phase: "commit_written",
+        commitSha: "d".repeat(40),
+        now: "2026-08-25T10:00:08.000Z",
+      });
+      store.transitionMaterialization({
+        sessionId: session.id,
+        materializationId: begun.materializationId,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["commit_written"],
+        phase: "branch_updated",
+        now: "2026-08-25T10:00:09.000Z",
+      });
+
+      store.beginDelivery({
+        sessionId: session.id,
+        materializationId: begun.materializationId,
+        controllerGeneration: started.controllerGeneration,
+        expectedRemoteHeadSha: null,
+        now: "2026-08-25T10:00:10.000Z",
+      });
+      store.transitionDelivery({
+        sessionId: session.id,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["intent_recorded"],
+        phase: "push_pending",
+        now: "2026-08-25T10:00:11.000Z",
+      });
+      store.transitionDelivery({
+        sessionId: session.id,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["push_pending"],
+        phase: "pushed",
+        remoteHeadSha: "d".repeat(40),
+        now: "2026-08-25T10:00:12.000Z",
+      });
+      store.transitionDelivery({
+        sessionId: session.id,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["pushed"],
+        phase: "pull_request_pending",
+        now: "2026-08-25T10:00:13.000Z",
+      });
+      store.transitionDelivery({
+        sessionId: session.id,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["pull_request_pending"],
+        phase: "pull_request_open",
+        pullRequest: "https://github.com/reinispilens/symphony/pull/42",
+        now: "2026-08-25T10:00:14.000Z",
+      });
+      store.transitionDelivery({
+        sessionId: session.id,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["pull_request_open"],
+        phase: "checks_pending",
+        now: "2026-08-25T10:00:15.000Z",
+      });
+      const pendingProof = {
+        id: "proof-42",
+        checkName: "proof / Protected final",
+        checkRunId: "4200",
+        workflowRunId: "420",
+        sourceSha: "d".repeat(40),
+        planDigest: "sha256:plan",
+        adapterDigest: "sha256:adapter",
+        policyDigest: "sha256:proof-policy",
+        resultDigest: null,
+        evidenceDigest: null,
+        status: "pending" as const,
+        recordedAt: "2026-08-25T10:00:16.000Z",
+        observedAt: null,
+      };
+      store.recordProof({
+        sessionId: session.id,
+        controllerGeneration: started.controllerGeneration,
+        proof: pendingProof,
+        now: pendingProof.recordedAt,
+      });
+      store.recordProof({
+        sessionId: session.id,
+        controllerGeneration: started.controllerGeneration,
+        proof: {
+          ...pendingProof,
+          status: "passed",
+          resultDigest: "sha256:result",
+          evidenceDigest: "sha256:evidence",
+          observedAt: "2026-08-25T10:00:17.000Z",
+        },
+        now: "2026-08-25T10:00:17.000Z",
+      });
+      const passedChecks = [
+        {
+          name: "proof / Protected final",
+          headSha: "d".repeat(40),
+          checkRunId: "4200",
+          workflowRunId: "420",
+          status: "passed" as const,
+          observedAt: "2026-08-25T10:00:17.000Z",
+        },
+      ];
+      store.transitionDelivery({
+        sessionId: session.id,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["checks_pending"],
+        phase: "review_pending",
+        requiredChecks: passedChecks,
+        now: "2026-08-25T10:00:18.000Z",
+      });
+      expect(() =>
+        store.transitionDelivery({
+          sessionId: session.id,
+          controllerGeneration: started.controllerGeneration,
+          expectedPhases: ["review_pending"],
+          phase: "merge_pending",
+          now: "2026-08-25T10:00:19.000Z",
+        }),
+      ).toThrowError(expect.objectContaining({ code: "controller_conflict" }));
+      store.transitionDelivery({
+        sessionId: session.id,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["review_pending"],
+        phase: "merged",
+        mergeSha: "e".repeat(40),
+        now: "2026-08-25T10:00:20.000Z",
+      });
+      store.transitionDelivery({
+        sessionId: session.id,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["merged"],
+        phase: "cleanup_pending",
+        cleanupStatus: "pending",
+        releaseIntentId: "effect-release-42",
+        now: "2026-08-25T10:00:21.000Z",
+      });
+      const completed = store.transitionDelivery({
+        sessionId: session.id,
+        controllerGeneration: started.controllerGeneration,
+        expectedPhases: ["cleanup_pending"],
+        phase: "completed",
+        cleanupStatus: "completed",
+        now: "2026-08-25T10:00:22.000Z",
+      });
+      expect(completed).toMatchObject({
+        delivery: {
+          phase: "completed",
+          immutableHeadSha: "d".repeat(40),
+          mergeSha: "e".repeat(40),
+          cleanupStatus: "completed",
+        },
+        proof: [{ id: "proof-42", status: "passed" }],
+      });
+
+      store.transitionManagedWorkspace({
+        sessionId: session.id,
+        attemptId: started.attemptId,
+        workspaceLeaseToken: workspace.workspaceLeaseToken,
+        controllerGeneration: started.controllerGeneration,
+        runtimeLeaseToken: null,
+        expectedPhases: ["ready"],
+        phase: "removal_pending",
+        error: null,
+        now: "2026-08-25T10:00:23.000Z",
+      });
+      store.transitionManagedWorkspace({
+        sessionId: session.id,
+        attemptId: started.attemptId,
+        workspaceLeaseToken: workspace.workspaceLeaseToken,
+        controllerGeneration: started.controllerGeneration,
+        runtimeLeaseToken: null,
+        expectedPhases: ["removal_pending"],
+        phase: "removed",
+        error: null,
+        now: "2026-08-25T10:00:24.000Z",
+      });
+      const rework = startAttempt(store, session.id, {
+        freshAttemptGeneration: "rework-2",
+        now: "2026-08-25T10:00:25.000Z",
+        leaseExpiresAt: "2026-08-25T10:02:25.000Z",
+      });
+      const reworkWorkspace = store.beginManagedWorkspace({
+        sessionId: session.id,
+        attemptId: rework.attemptId,
+        runtimeLeaseToken: rework.runtimeLeaseToken,
+        controllerGeneration: rework.controllerGeneration,
+        path: "/workspaces/SYM-delivery",
+        workspaceKey: "SYM-delivery",
+        repositoryIdentity: "reinispilens/symphony",
+        profileDigest: acceptedDeliveryConfiguration().productProfile.digest,
+        sourceRoot: "/repositories/symphony",
+        workspaceRoot: "/workspaces",
+        baseRef: "refs/heads/main",
+        baseSha: "a".repeat(40),
+        branch: "symphony/SYM-delivery-rework",
+        freshAttemptGeneration: "rework-2",
+        now: "2026-08-25T10:00:26.000Z",
+      });
+      store.transitionManagedWorkspace({
+        sessionId: session.id,
+        attemptId: rework.attemptId,
+        workspaceLeaseToken: reworkWorkspace.workspaceLeaseToken,
+        controllerGeneration: rework.controllerGeneration,
+        runtimeLeaseToken: rework.runtimeLeaseToken,
+        expectedPhases: ["allocating"],
+        phase: "provisioned",
+        error: null,
+        now: "2026-08-25T10:00:27.000Z",
+      });
+      store.transitionManagedWorkspace({
+        sessionId: session.id,
+        attemptId: rework.attemptId,
+        workspaceLeaseToken: reworkWorkspace.workspaceLeaseToken,
+        controllerGeneration: rework.controllerGeneration,
+        runtimeLeaseToken: rework.runtimeLeaseToken,
+        expectedPhases: ["provisioned"],
+        phase: "ready",
+        error: null,
+        now: "2026-08-25T10:00:28.000Z",
+      });
+      store.finishAttempt({
+        sessionId: session.id,
+        attemptId: rework.attemptId,
+        runtimeLeaseToken: rework.runtimeLeaseToken,
+        controllerGeneration: rework.controllerGeneration,
+        status: "completed",
+        error: null,
+        now: "2026-08-25T10:00:29.000Z",
+      });
+      const secondMaterialization = store.beginMaterialization({
+        sessionId: session.id,
+        attemptId: rework.attemptId,
+        workspaceLeaseToken: reworkWorkspace.workspaceLeaseToken,
+        controllerGeneration: rework.controllerGeneration,
+        parentSha: "a".repeat(40),
+        branch: "symphony/SYM-delivery-rework",
+        expectedOldSha: "a".repeat(40),
+        inclusionPolicyDigest: "sha256:materialization-v1",
+        now: "2026-08-25T10:00:30.000Z",
+      });
+      store.transitionMaterialization({
+        sessionId: session.id,
+        materializationId: secondMaterialization.materializationId,
+        controllerGeneration: rework.controllerGeneration,
+        expectedPhases: ["intent_recorded"],
+        phase: "snapshot_recorded",
+        inputManifestDigest: "sha256:manifest-2",
+        inputManifest: [],
+        now: "2026-08-25T10:00:31.000Z",
+      });
+      store.transitionMaterialization({
+        sessionId: session.id,
+        materializationId: secondMaterialization.materializationId,
+        controllerGeneration: rework.controllerGeneration,
+        expectedPhases: ["snapshot_recorded"],
+        phase: "tree_written",
+        treeSha: "f".repeat(40),
+        now: "2026-08-25T10:00:32.000Z",
+      });
+      store.transitionMaterialization({
+        sessionId: session.id,
+        materializationId: secondMaterialization.materializationId,
+        controllerGeneration: rework.controllerGeneration,
+        expectedPhases: ["tree_written"],
+        phase: "commit_written",
+        commitSha: "1".repeat(40),
+        now: "2026-08-25T10:00:33.000Z",
+      });
+      store.transitionMaterialization({
+        sessionId: session.id,
+        materializationId: secondMaterialization.materializationId,
+        controllerGeneration: rework.controllerGeneration,
+        expectedPhases: ["commit_written"],
+        phase: "branch_updated",
+        now: "2026-08-25T10:00:34.000Z",
+      });
+      const redelivering = store.beginDelivery({
+        sessionId: session.id,
+        materializationId: secondMaterialization.materializationId,
+        controllerGeneration: rework.controllerGeneration,
+        expectedRemoteHeadSha: null,
+        now: "2026-08-25T10:00:35.000Z",
+      });
+      expect(redelivering.deliveryHistory).toHaveLength(1);
+      expect(redelivering.deliveryHistory[0]).toEqual(completed.delivery);
+      expect(redelivering.delivery).toMatchObject({
+        phase: "intent_recorded",
+        materializationId: secondMaterialization.materializationId,
+        immutableHeadSha: "1".repeat(40),
+      });
     } finally {
       store.close();
     }

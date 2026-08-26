@@ -41,6 +41,7 @@ function completeDocument(): WorkSessionDocument {
         id: "widgets-production",
         digest: "sha256:binding",
       },
+      deliveryGrant: null,
     },
     controller: {
       kind: "human",
@@ -126,6 +127,17 @@ function completeDocument(): WorkSessionDocument {
         expectedOldSha: "a".repeat(40),
         inclusionPolicyDigest: "sha256:inclusion-policy",
         inputManifestDigest: "sha256:input-manifest",
+        inputManifest: [
+          {
+            path: "src/index.ts",
+            kind: "regular",
+            mode: "100644",
+            size: 12,
+            contentDigest: "sha256:source",
+            blobSha: "d".repeat(40),
+            origin: "tracked",
+          },
+        ],
         treeSha: "b".repeat(40),
         commitSha: "c".repeat(40),
         lastError: null,
@@ -150,6 +162,7 @@ function completeDocument(): WorkSessionDocument {
         observedAt: "2026-08-25T10:07:00.000Z",
       },
     ],
+    deliveryHistory: [],
     delivery: {
       phase: "completed",
       materializationId: "materialization-1",
@@ -170,7 +183,7 @@ function completeDocument(): WorkSessionDocument {
       ],
       mergeSha: "d".repeat(40),
       cleanupStatus: "completed",
-      releaseIntentId: null,
+      releaseIntentId: "effect-release-1",
       lastError: null,
       startedAt: "2026-08-25T10:05:00.000Z",
       updatedAt: "2026-08-25T10:10:00.000Z",

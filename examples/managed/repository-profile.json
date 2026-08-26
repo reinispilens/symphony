@@ -1,10 +1,20 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "repositoryIdentity": "your-owner/your-repository",
   "baseRef": "refs/remotes/origin/main",
   "authoringContext": {
     "promptPath": ".symphony/prompt.md",
     "paths": ["AGENTS.md"]
   },
-  "preparationClass": "pnpm"
+  "preparationClass": "pnpm",
+  "deliveryGrant": {
+    "authority": "owner-gated",
+    "governingPolicy": {
+      "repositoryIdentity": "reinispilens/.github",
+      "path": "agent-system/tracker-policy.json",
+      "revision": "730910949386f6898107d6c14c96ff3b06ef1f4d",
+      "digest": "sha256:454e77a4e42cb905722c3b9746fb54a3114082238ebabd907d770bc1e80174ad"
+    },
+    "requiredChecks": ["proof / Protected final"]
+  }
 }

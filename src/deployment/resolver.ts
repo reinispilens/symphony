@@ -23,8 +23,10 @@ import type { WorkflowDefinition } from "../workflow/definition.js";
 import type { WorkflowSnapshot } from "../workflow/store.js";
 import {
   DEPLOYMENT_BINDING_SCHEMA_VERSION,
+  LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION,
+  LEGACY_REPOSITORY_PROFILE_SCHEMA_VERSION,
   REPOSITORY_PROFILE_SCHEMA_VERSION,
-  type DeploymentBindingDocument,
+  type NormalizedDeploymentBindingDocument,
   type RepositoryProfileDocument,
   type ResolvedDeployment,
 } from "./model.js";
@@ -309,8 +311,23 @@ function parseJson(
 }
 
 function parseRepositoryProfile(bytes: Buffer): RepositoryProfileDocument {
+  const decoded = parseJson(bytes, "repository profile", "profile");
+  if (!isRecord(decoded)) {
+    invalid("profile", "repository profile", "must be an object");
+  }
+  const schemaVersion = decoded["schemaVersion"];
+  if (
+    schemaVersion !== LEGACY_REPOSITORY_PROFILE_SCHEMA_VERSION &&
+    schemaVersion !== REPOSITORY_PROFILE_SCHEMA_VERSION
+  ) {
+    invalid(
+      "profile",
+      "repository profile.schemaVersion",
+      `must equal ${LEGACY_REPOSITORY_PROFILE_SCHEMA_VERSION} or ${REPOSITORY_PROFILE_SCHEMA_VERSION}`,
+    );
+  }
   const source = strictObject(
-    parseJson(bytes, "repository profile", "profile"),
+    decoded,
     "repository profile",
     [
       "schemaVersion",
@@ -318,16 +335,12 @@ function parseRepositoryProfile(bytes: Buffer): RepositoryProfileDocument {
       "baseRef",
       "authoringContext",
       "preparationClass",
+      ...(schemaVersion === REPOSITORY_PROFILE_SCHEMA_VERSION
+        ? ["deliveryGrant"]
+        : []),
     ],
     "profile",
   );
-  if (source["schemaVersion"] !== REPOSITORY_PROFILE_SCHEMA_VERSION) {
-    invalid(
-      "profile",
-      "repository profile.schemaVersion",
-      `must equal ${REPOSITORY_PROFILE_SCHEMA_VERSION}`,
-    );
-  }
   const context = strictObject(
     source["authoringContext"],
     "repository profile.authoringContext",
@@ -387,8 +400,95 @@ function parseRepositoryProfile(bytes: Buffer): RepositoryProfileDocument {
       "must be 'none' or 'pnpm'",
     );
   }
+  let deliveryGrant: RepositoryProfileDocument["deliveryGrant"] = null;
+  if (schemaVersion === REPOSITORY_PROFILE_SCHEMA_VERSION) {
+    const grant = strictObject(
+      source["deliveryGrant"],
+      "repository profile.deliveryGrant",
+      ["authority", "governingPolicy", "requiredChecks"],
+      "profile",
+    );
+    const authority = grant["authority"];
+    if (authority !== "owner-gated" && authority !== "full-in-scope") {
+      invalid(
+        "profile",
+        "repository profile.deliveryGrant.authority",
+        "must be 'owner-gated' or 'full-in-scope'",
+      );
+    }
+    const policy = strictObject(
+      grant["governingPolicy"],
+      "repository profile.deliveryGrant.governingPolicy",
+      ["repositoryIdentity", "path", "revision", "digest"],
+      "profile",
+    );
+    const policyIdentity = repositoryIdentity(
+      policy["repositoryIdentity"],
+      "repository profile.deliveryGrant.governingPolicy.repositoryIdentity",
+      "profile",
+    );
+    if (!policyIdentity.toLowerCase().endsWith("/.github")) {
+      invalid(
+        "profile",
+        "repository profile.deliveryGrant.governingPolicy.repositoryIdentity",
+        "must identify an owner or organization .github repository",
+      );
+    }
+    const policyRevision = nonEmptyString(
+      policy["revision"],
+      "repository profile.deliveryGrant.governingPolicy.revision",
+      "profile",
+    );
+    if (!/^[0-9a-f]{40}$/u.test(policyRevision)) {
+      invalid(
+        "profile",
+        "repository profile.deliveryGrant.governingPolicy.revision",
+        "must be a full lowercase Git SHA-1",
+      );
+    }
+    const requiredChecks = stringList(
+      grant["requiredChecks"],
+      "repository profile.deliveryGrant.requiredChecks",
+      "profile",
+    );
+    if (requiredChecks.length === 0) {
+      invalid(
+        "profile",
+        "repository profile.deliveryGrant.requiredChecks",
+        "must contain at least one protected required check",
+      );
+    }
+    if (
+      JSON.stringify(requiredChecks) !==
+      JSON.stringify([...requiredChecks].sort())
+    ) {
+      invalid(
+        "profile",
+        "repository profile.deliveryGrant.requiredChecks",
+        "must be sorted by check name",
+      );
+    }
+    deliveryGrant = {
+      authority,
+      governingPolicy: {
+        repositoryIdentity: policyIdentity,
+        path: repositoryPath(
+          policy["path"],
+          "repository profile.deliveryGrant.governingPolicy.path",
+          "profile",
+        ),
+        revision: policyRevision,
+        digest: strictDigest(
+          policy["digest"],
+          "repository profile.deliveryGrant.governingPolicy.digest",
+          "profile",
+        ),
+      },
+      requiredChecks,
+    };
+  }
   return {
-    schemaVersion: REPOSITORY_PROFILE_SCHEMA_VERSION,
+    schemaVersion,
     repositoryIdentity: repositoryIdentity(
       source["repositoryIdentity"],
       "repository profile.repositoryIdentity",
@@ -397,10 +497,13 @@ function parseRepositoryProfile(bytes: Buffer): RepositoryProfileDocument {
     baseRef,
     authoringContext: { promptPath, paths },
     preparationClass,
+    deliveryGrant,
   };
 }
 
-function parseTracker(value: unknown): DeploymentBindingDocument["tracker"] {
+function parseTracker(
+  value: unknown,
+): NormalizedDeploymentBindingDocument["tracker"] {
   const source = strictObject(
     value,
     "binding.tracker",
@@ -481,9 +584,26 @@ function numberMap(
   return result;
 }
 
-function parseDeploymentBinding(bytes: Buffer): DeploymentBindingDocument {
+function parseDeploymentBinding(
+  bytes: Buffer,
+): NormalizedDeploymentBindingDocument {
+  const decoded = parseJson(bytes, "deployment binding", "binding");
+  if (!isRecord(decoded)) {
+    invalid("binding", "binding", "must be an object");
+  }
+  const schemaVersion = decoded["schemaVersion"];
+  if (
+    schemaVersion !== LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION &&
+    schemaVersion !== DEPLOYMENT_BINDING_SCHEMA_VERSION
+  ) {
+    invalid(
+      "binding",
+      "binding.schemaVersion",
+      `must equal ${LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION} or ${DEPLOYMENT_BINDING_SCHEMA_VERSION}`,
+    );
+  }
   const source = strictObject(
-    parseJson(bytes, "deployment binding", "binding"),
+    decoded,
     "binding",
     [
       "schemaVersion",
@@ -493,6 +613,9 @@ function parseDeploymentBinding(bytes: Buffer): DeploymentBindingDocument {
       "workspaceRoot",
       "branchPrefix",
       "gitExecutable",
+      ...(schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
+        ? ["deliveryProvider"]
+        : []),
       "tracker",
       "polling",
       "preparation",
@@ -501,13 +624,6 @@ function parseDeploymentBinding(bytes: Buffer): DeploymentBindingDocument {
     ],
     "binding",
   );
-  if (source["schemaVersion"] !== DEPLOYMENT_BINDING_SCHEMA_VERSION) {
-    invalid(
-      "binding",
-      "binding.schemaVersion",
-      `must equal ${DEPLOYMENT_BINDING_SCHEMA_VERSION}`,
-    );
-  }
   const profile = strictObject(
     source["productProfile"],
     "binding.productProfile",
@@ -605,8 +721,60 @@ function parseDeploymentBinding(bytes: Buffer): DeploymentBindingDocument {
       "must be 'systemd-user-scope'",
     );
   }
+  const deliveryProviderValue =
+    schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
+      ? source["deliveryProvider"]
+      : null;
+  const deliveryProvider =
+    deliveryProviderValue === null
+      ? null
+      : strictObject(
+          deliveryProviderValue,
+          "binding.deliveryProvider",
+          [
+            "protocolVersion",
+            "executable",
+            "timeoutMs",
+            "secretEnvironmentNames",
+          ],
+          "binding",
+        );
+  if (deliveryProvider !== null && deliveryProvider["protocolVersion"] !== 1) {
+    invalid(
+      "binding",
+      "binding.deliveryProvider.protocolVersion",
+      "must equal 1",
+    );
+  }
+  const deliverySecretNames =
+    deliveryProvider === null
+      ? []
+      : stringList(
+          deliveryProvider["secretEnvironmentNames"],
+          "binding.deliveryProvider.secretEnvironmentNames",
+          "binding",
+        );
+  for (const [index, name] of deliverySecretNames.entries()) {
+    if (!/^[A-Z_][A-Z0-9_]*$/u.test(name)) {
+      invalid(
+        "binding",
+        `binding.deliveryProvider.secretEnvironmentNames[${index}]`,
+        "must be an uppercase environment-variable name",
+      );
+    }
+  }
+  if (
+    JSON.stringify(deliverySecretNames) !==
+    JSON.stringify([...deliverySecretNames].sort())
+  ) {
+    invalid(
+      "binding",
+      "binding.deliveryProvider.secretEnvironmentNames",
+      "must be sorted",
+    );
+  }
   return {
-    schemaVersion: DEPLOYMENT_BINDING_SCHEMA_VERSION,
+    schemaVersion,
     id: nonEmptyString(source["id"], "binding.id", "binding"),
     productProfile: {
       repositoryIdentity: repositoryIdentity(
@@ -640,6 +808,22 @@ function parseDeploymentBinding(bytes: Buffer): DeploymentBindingDocument {
       source["gitExecutable"],
       "binding.gitExecutable",
     ),
+    deliveryProvider:
+      deliveryProvider === null
+        ? null
+        : {
+            protocolVersion: 1,
+            executable: absolutePath(
+              deliveryProvider["executable"],
+              "binding.deliveryProvider.executable",
+            ),
+            timeoutMs: integer(
+              deliveryProvider["timeoutMs"],
+              "binding.deliveryProvider.timeoutMs",
+              1,
+            ),
+            secretEnvironmentNames: deliverySecretNames,
+          },
     tracker: parseTracker(source["tracker"]),
     polling: {
       intervalMs: integer(
@@ -942,7 +1126,7 @@ async function executable(filePath: string, label: string): Promise<string> {
 
 function dependencyPolicyDigest(
   policy: NonNullable<
-    DeploymentBindingDocument["preparation"]
+    NormalizedDeploymentBindingDocument["preparation"]
   >["dependencyPolicy"],
 ): string {
   return sha256(
@@ -958,7 +1142,9 @@ function dependencyPolicyDigest(
 }
 
 async function resolvePreparationAuthority(
-  preparation: NonNullable<DeploymentBindingDocument["preparation"]> | null,
+  preparation: NonNullable<
+    NormalizedDeploymentBindingDocument["preparation"]
+  > | null,
   roots: {
     readonly sourceRoot: string;
     readonly stateRoot: string;
@@ -1053,7 +1239,7 @@ async function resolvePreparationAuthority(
 }
 
 function syntheticWorkflowConfig(
-  binding: DeploymentBindingDocument,
+  binding: NormalizedDeploymentBindingDocument,
   profile: RepositoryProfileDocument,
 ): JsonObject {
   return {
@@ -1195,6 +1381,14 @@ export async function resolveDeploymentBinding(
       "Deployment preparation authority must be present exactly when the accepted product profile selects 'pnpm'",
     );
   }
+  if (
+    (profile.deliveryGrant !== null) !==
+    (binding.deliveryProvider !== null)
+  ) {
+    refuse(
+      "Deployment delivery-provider authority must be present exactly when the accepted product profile contains a delivery grant",
+    );
+  }
   const baseSha = await git(gitExecutable, sourceRoot, [
     "rev-parse",
     "--verify",
@@ -1271,6 +1465,7 @@ export async function resolveDeploymentBinding(
     },
     authoringContext,
     deploymentBinding: { id: binding.id, digest: bindingDigest },
+    deliveryGrant: profile.deliveryGrant,
   };
 
   const codexExecutable = await executable(
@@ -1285,12 +1480,36 @@ export async function resolveDeploymentBinding(
     binding.runtime.containment.systemctlExecutable,
     "deployment systemctl executable",
   );
+  const deliveryProviderExecutable =
+    binding.deliveryProvider === null
+      ? null
+      : await executable(
+          binding.deliveryProvider.executable,
+          "deployment delivery-provider executable",
+        );
   for (const [label, executablePath] of [
     ["Codex", codexExecutable],
     ["systemd-run", systemdRunExecutable],
     ["systemctl", systemctlExecutable],
+    ...(deliveryProviderExecutable === null
+      ? []
+      : [["delivery provider", deliveryProviderExecutable] as const]),
   ] as const) {
     assertExecutableOutsideGovernedRoots(label, executablePath, governedRoots);
+  }
+  if (
+    deliveryProviderExecutable !== null &&
+    deliveryProviderExecutable !== binding.deliveryProvider?.executable
+  ) {
+    refuse(
+      "Deployment delivery-provider executable must contain no symbolic-link components",
+    );
+  }
+  const sourceEnvironment = options.environment ?? process.env;
+  for (const name of binding.deliveryProvider?.secretEnvironmentNames ?? []) {
+    if ((sourceEnvironment[name] ?? "").trim() === "") {
+      refuse(`Deployment delivery-provider secret ${name} is missing`);
+    }
   }
   const preparationAuthority = await resolvePreparationAuthority(
     binding.preparation,
@@ -1326,6 +1545,15 @@ export async function resolveDeploymentBinding(
   }
   const serviceConfig: ServiceConfig = {
     ...baseConfig,
+    tracker: {
+      ...baseConfig.tracker,
+      secretEnvironmentNames: [
+        ...new Set([
+          ...baseConfig.tracker.secretEnvironmentNames,
+          ...(binding.deliveryProvider?.secretEnvironmentNames ?? []),
+        ]),
+      ],
+    },
     deployment: {
       bindingId: binding.id,
       bindingDigest,
@@ -1335,6 +1563,13 @@ export async function resolveDeploymentBinding(
       acceptedConfiguration,
       codexExecutable,
       gitExecutable,
+      deliveryProvider:
+        binding.deliveryProvider === null || deliveryProviderExecutable === null
+          ? null
+          : {
+              ...binding.deliveryProvider,
+              executable: deliveryProviderExecutable,
+            },
       preparation: preparationAuthority,
       processContainment: {
         provider: "systemd-user-scope",

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "your-repository-production",
   "productProfile": {
     "repositoryIdentity": "your-owner/your-repository",
@@ -12,6 +12,12 @@
   "workspaceRoot": "/srv/symphony-workspaces/your-repository",
   "branchPrefix": "symphony/",
   "gitExecutable": "/usr/bin/git",
+  "deliveryProvider": {
+    "protocolVersion": 1,
+    "executable": "/opt/symphony/providers/github-delivery",
+    "timeoutMs": 30000,
+    "secretEnvironmentNames": ["SYMPHONY_DELIVERY_TOKEN"]
+  },
   "tracker": {
     "kind": "github-projects",
     "provider": {

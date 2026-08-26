@@ -56,10 +56,21 @@ export interface DeploymentBindingSnapshot {
   readonly digest: string;
 }
 
+export type DeliveryAuthorityProfile = "owner-gated" | "full-in-scope";
+
+/** Product-owner authority pinned from the accepted repository profile. */
+export interface DeliveryGrantSnapshot {
+  readonly authority: DeliveryAuthorityProfile;
+  readonly governingPolicy: RepositoryContentSnapshot;
+  readonly requiredChecks: readonly string[];
+}
+
 export interface AcceptedConfigurationSnapshot {
   readonly productProfile: RepositoryContentSnapshot;
   readonly authoringContext: AuthoringContextSnapshot;
   readonly deploymentBinding: DeploymentBindingSnapshot;
+  /** Null only for the version-1 managed-profile compatibility path. */
+  readonly deliveryGrant: DeliveryGrantSnapshot | null;
 }
 
 export interface ControllerAssignment {
@@ -265,6 +276,16 @@ export type MaterializationPhase =
   | "branch_updated"
   | "refused";
 
+export interface SourceMaterializationInputEntry {
+  readonly path: string;
+  readonly kind: "regular" | "symlink";
+  readonly mode: "100644" | "100755" | "120000";
+  readonly size: number;
+  readonly contentDigest: string;
+  readonly blobSha: string;
+  readonly origin: "tracked" | "untracked";
+}
+
 export interface SourceMaterializationRecord {
   readonly id: string;
   readonly attemptId: string;
@@ -276,12 +297,60 @@ export interface SourceMaterializationRecord {
   readonly expectedOldSha: string;
   readonly inclusionPolicyDigest: string;
   readonly inputManifestDigest: string | null;
+  readonly inputManifest: readonly SourceMaterializationInputEntry[] | null;
   readonly treeSha: string | null;
   readonly commitSha: string | null;
   readonly lastError: string | null;
   readonly startedAt: string;
   readonly updatedAt: string;
 }
+
+export interface BeginMaterializationInput {
+  readonly sessionId: string;
+  readonly attemptId: string;
+  readonly workspaceLeaseToken: string;
+  readonly controllerGeneration: number;
+  readonly parentSha: string;
+  readonly branch: string;
+  readonly expectedOldSha: string;
+  readonly inclusionPolicyDigest: string;
+  readonly now: string;
+}
+
+export interface BegunMaterialization {
+  readonly session: WorkSessionSnapshot;
+  readonly materializationId: string;
+}
+
+interface TransitionMaterializationBase {
+  readonly sessionId: string;
+  readonly materializationId: string;
+  readonly controllerGeneration: number;
+  readonly expectedPhases: readonly MaterializationPhase[];
+  readonly now: string;
+}
+
+export type TransitionMaterializationInput =
+  | (TransitionMaterializationBase & {
+      readonly phase: "snapshot_recorded";
+      readonly inputManifestDigest: string;
+      readonly inputManifest: readonly SourceMaterializationInputEntry[];
+    })
+  | (TransitionMaterializationBase & {
+      readonly phase: "tree_written";
+      readonly treeSha: string;
+    })
+  | (TransitionMaterializationBase & {
+      readonly phase: "commit_written";
+      readonly commitSha: string;
+    })
+  | (TransitionMaterializationBase & {
+      readonly phase: "branch_updated";
+    })
+  | (TransitionMaterializationBase & {
+      readonly phase: "refused";
+      readonly error: string;
+    });
 
 export type DeliveryPhase =
   | "intent_recorded"
@@ -327,6 +396,36 @@ export interface DeliveryState {
   readonly updatedAt: string;
 }
 
+export interface BeginDeliveryInput {
+  readonly sessionId: string;
+  readonly materializationId: string;
+  readonly controllerGeneration: number;
+  readonly expectedRemoteHeadSha: string | null;
+  readonly now: string;
+}
+
+export interface TransitionDeliveryInput {
+  readonly sessionId: string;
+  readonly controllerGeneration: number;
+  readonly expectedPhases: readonly DeliveryPhase[];
+  readonly phase: DeliveryPhase;
+  readonly pullRequest?: string | null;
+  readonly remoteHeadSha?: string | null;
+  readonly requiredChecks?: readonly RequiredCheckObservation[];
+  readonly mergeSha?: string | null;
+  readonly cleanupStatus?: DeliveryState["cleanupStatus"];
+  readonly releaseIntentId?: string | null;
+  readonly error?: string | null;
+  readonly now: string;
+}
+
+export interface RecordProofInput {
+  readonly sessionId: string;
+  readonly controllerGeneration: number;
+  readonly proof: ProofCorrelation;
+  readonly now: string;
+}
+
 export interface WorkSessionDocument {
   readonly schemaVersion: typeof WORK_SESSION_SCHEMA_VERSION;
   readonly id: string;
@@ -345,6 +444,8 @@ export interface WorkSessionDocument {
   readonly retry: RetryIntent | null;
   readonly materializations: readonly SourceMaterializationRecord[];
   readonly proof: readonly ProofCorrelation[];
+  /** Terminal prior deliveries, archived only when a later materialization begins delivery. */
+  readonly deliveryHistory: readonly DeliveryState[];
   readonly delivery: DeliveryState | null;
   readonly createdAt: string;
   readonly updatedAt: string;

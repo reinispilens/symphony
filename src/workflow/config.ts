@@ -83,6 +83,12 @@ export interface DeploymentAuthorityConfig {
   readonly acceptedConfiguration: AcceptedConfigurationSnapshot;
   readonly codexExecutable: string;
   readonly gitExecutable: string;
+  readonly deliveryProvider: {
+    readonly protocolVersion: 1;
+    readonly executable: string;
+    readonly timeoutMs: number;
+    readonly secretEnvironmentNames: readonly string[];
+  } | null;
   readonly preparation: ManagedPnpmPreparationAuthorityConfig | null;
   readonly processContainment: ManagedProcessContainmentConfig;
 }
