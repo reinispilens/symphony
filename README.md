@@ -76,14 +76,24 @@ The product repository commits a thin `.symphony/repository-profile.json` and it
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "repositoryIdentity": "your-owner/your-repository",
   "baseRef": "refs/remotes/origin/main",
   "authoringContext": {
     "promptPath": ".symphony/prompt.md",
     "paths": ["AGENTS.md"]
   },
-  "preparationClass": "pnpm"
+  "preparationClass": "pnpm",
+  "deliveryGrant": {
+    "authority": "owner-gated",
+    "governingPolicy": {
+      "repositoryIdentity": "your-owner/.github",
+      "path": "agent-system/tracker-policy.json",
+      "revision": "0000000000000000000000000000000000000000",
+      "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "requiredChecks": ["proof / Protected final"]
+  }
 }
 ```
 
@@ -97,6 +107,12 @@ Bubblewrap paths plus one versioned offline dependency policy and a read-only se
 When the accepted profile selects `preparationClass: "none"`, the binding sets `preparation` to
 `null`; Symphony neither requires nor validates an unused pnpm toolchain or seed. A missing or
 extra pnpm authority is a profile/binding mismatch and is refused.
+
+A version-2 binding also names one operator-owned delivery-provider executable and only the secret
+environment-variable names it receives. The provider performs credentialed hosting operations from
+typed, credential-free requests; candidate execution never receives those credentials. Symphony
+materializes edited source through its own bounded manifest and temporary index, then correlates
+push, PR, exact-head protected checks, grant-constrained merge, and cleanup durably across restart.
 
 Run only the binding for a managed repository:
 

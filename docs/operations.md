@@ -4,8 +4,8 @@
 > This runbook documents the managed-workspace implementation plus the existing
 > hook-based compatibility route. New repositories use the Symphony-owned
 > [`repository-driver boundary`](repository-driver-boundary.md); they do not implement Symphony
-> lifecycle features locally. WCP protected proof, durable delivery, and the Dyslexify deployment
-> pilot remain separate gates.
+> lifecycle features locally. WCP protected proof and Symphony's durable delivery substrate exist;
+> accepted governance composition and the Dyslexify deployment pilot remain separate gates.
 
 ## Deployment map
 
@@ -102,6 +102,20 @@ Managed startup validates origin/base/root/executable facts before SQLite or wor
 The binding, accepted profile/context, and host topology are pinned for the daemon lifetime; there
 is no live reload. Stop cleanly, validate the new binding and state-root intent, then restart. Do
 not work around a refusal by moving the database or editing candidate copies of the profile.
+
+For a version-2 delivery profile, install the operator-owned delivery-provider executable outside
+the product, state, and workspace roots. Name only the credential environment variables it needs in
+the binding; Symphony refuses missing names, scrubs them from candidate execution, and sends the
+provider a credential-free JSON request on stdin. The provider must return one bounded protocol-v1
+observation on stdout. Treat a timeout, non-zero exit, truncated response, or invalid JSON as an
+ambiguous remote mutation: inspect exact provider truth before retrying. Never give the coding agent
+the provider credential as a workaround.
+
+Materialization and delivery are resumable WorkSession operations, not repository hooks. Do not
+run `git add`, `git commit`, push, PR, merge, or branch cleanup from a product-owned lifecycle script
+for a managed deployment. If Symphony refuses unsupported repository state (filters, submodules,
+nested repositories, active `info/exclude`, oversized input, or concurrent mutation), retain the
+workspace and repair or explicitly redesign that boundary; do not broaden the inclusion policy.
 
 For an existing hook-based compatibility deployment, validate every configured hook manually from
 an empty disposable directory before starting a daemon. In particular, a harness `before_remove`

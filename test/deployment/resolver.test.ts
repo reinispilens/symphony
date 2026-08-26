@@ -221,7 +221,115 @@ async function selectPreparationClass(
   };
 }
 
+async function selectDeliveryGrant(
+  setup: Fixture,
+  authority: "owner-gated" | "full-in-scope" = "owner-gated",
+): Promise<DeploymentBindingDocument> {
+  const profileFile = path.join(setup.sourceRoot, setup.profilePath);
+  const profile = JSON.parse(await readFile(profileFile, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  profile["schemaVersion"] = 2;
+  profile["deliveryGrant"] = {
+    authority,
+    governingPolicy: {
+      repositoryIdentity: "acme/.github",
+      path: "agent-system/delivery-policy.json",
+      revision: "2".repeat(40),
+      digest: `sha256:${"3".repeat(64)}`,
+    },
+    requiredChecks: ["proof / Protected final"],
+  };
+  const profileBytes = `${JSON.stringify(profile, null, 2)}\n`;
+  await writeFile(profileFile, profileBytes);
+  await command("git", ["-C", setup.sourceRoot, "add", setup.profilePath]);
+  await command("git", [
+    "-C",
+    setup.sourceRoot,
+    "commit",
+    "-m",
+    "select delivery authority",
+  ]);
+  const providerExecutable = path.join(
+    path.dirname(setup.binding.runtime.codexExecutable),
+    "delivery-provider",
+  );
+  await writeFile(providerExecutable, "#!/bin/sh\nexit 0\n");
+  await chmod(providerExecutable, 0o755);
+  const binding: DeploymentBindingDocument = {
+    ...setup.binding,
+    schemaVersion: 2,
+    productProfile: {
+      ...setup.binding.productProfile,
+      revision: await command("git", [
+        "-C",
+        setup.sourceRoot,
+        "rev-parse",
+        "HEAD",
+      ]),
+      digest: digest(profileBytes),
+    },
+    deliveryProvider: {
+      protocolVersion: 1,
+      executable: providerExecutable,
+      timeoutMs: 30_000,
+      secretEnvironmentNames: ["DELIVERY_TOKEN"],
+    },
+  };
+  await writeFile(setup.bindingPath, `${JSON.stringify(binding, null, 2)}\n`);
+  return binding;
+}
+
 describe("deployment binding resolver", () => {
+  it("pins a v2 product-owner delivery grant while keeping provider credentials operator-owned", async () => {
+    await withTempDirectory(async (directory) => {
+      const setup = await fixture(directory);
+      const binding = await selectDeliveryGrant(setup, "full-in-scope");
+      const resolved = await resolveDeploymentBinding({
+        bindingPath: setup.bindingPath,
+        trackerProfiles: testTrackerProfiles,
+        environment: { DELIVERY_TOKEN: "operator-secret" },
+      });
+
+      expect(resolved.acceptedConfiguration.deliveryGrant).toEqual({
+        authority: "full-in-scope",
+        governingPolicy: {
+          repositoryIdentity: "acme/.github",
+          path: "agent-system/delivery-policy.json",
+          revision: "2".repeat(40),
+          digest: `sha256:${"3".repeat(64)}`,
+        },
+        requiredChecks: ["proof / Protected final"],
+      });
+      expect(resolved.serviceConfig.deployment?.deliveryProvider).toEqual(
+        binding.deliveryProvider,
+      );
+      expect(resolved.serviceConfig.tracker.secretEnvironmentNames).toContain(
+        "DELIVERY_TOKEN",
+      );
+      expect(JSON.stringify(resolved)).not.toContain("operator-secret");
+    });
+  });
+
+  it("refuses v2 delivery when its separately named operator secret is absent", async () => {
+    await withTempDirectory(async (directory) => {
+      const setup = await fixture(directory);
+      await selectDeliveryGrant(setup);
+
+      await expect(
+        resolveDeploymentBinding({
+          bindingPath: setup.bindingPath,
+          trackerProfiles: testTrackerProfiles,
+          environment: {},
+        }),
+      ).rejects.toMatchObject({
+        code: "deployment_binding_refused",
+        message: expect.stringContaining("DELIVERY_TOKEN is missing"),
+      });
+    });
+  });
+
   it("composes operator topology with product facts from one exact Git revision", async () => {
     await withTempDirectory(async (directory) => {
       const setup = await fixture(directory);

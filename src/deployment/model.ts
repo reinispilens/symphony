@@ -1,13 +1,20 @@
 import type { JsonObject } from "../shared/json.js";
-import type { AcceptedConfigurationSnapshot } from "../state/model.js";
+import type {
+  AcceptedConfigurationSnapshot,
+  DeliveryGrantSnapshot,
+} from "../state/model.js";
 import type { ServiceConfig } from "../workflow/config.js";
 import type { WorkflowSnapshot } from "../workflow/store.js";
 
-export const REPOSITORY_PROFILE_SCHEMA_VERSION = 1;
-export const DEPLOYMENT_BINDING_SCHEMA_VERSION = 1;
+export const REPOSITORY_PROFILE_SCHEMA_VERSION = 2;
+export const LEGACY_REPOSITORY_PROFILE_SCHEMA_VERSION = 1;
+export const DEPLOYMENT_BINDING_SCHEMA_VERSION = 2;
+export const LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION = 1;
 
 export interface RepositoryProfileDocument {
-  readonly schemaVersion: typeof REPOSITORY_PROFILE_SCHEMA_VERSION;
+  readonly schemaVersion:
+    | typeof LEGACY_REPOSITORY_PROFILE_SCHEMA_VERSION
+    | typeof REPOSITORY_PROFILE_SCHEMA_VERSION;
   readonly repositoryIdentity: string;
   readonly baseRef: string;
   readonly authoringContext: {
@@ -15,10 +22,18 @@ export interface RepositoryProfileDocument {
     readonly paths: readonly string[];
   };
   readonly preparationClass: "none" | "pnpm";
+  /** Null only when reading the version-1 compatibility schema. */
+  readonly deliveryGrant: DeliveryGrantSnapshot | null;
 }
 
-export interface DeploymentBindingDocument {
-  readonly schemaVersion: typeof DEPLOYMENT_BINDING_SCHEMA_VERSION;
+export interface DeliveryProviderBinding {
+  readonly protocolVersion: 1;
+  readonly executable: string;
+  readonly timeoutMs: number;
+  readonly secretEnvironmentNames: readonly string[];
+}
+
+interface DeploymentBindingFields {
   readonly id: string;
   readonly productProfile: {
     readonly repositoryIdentity: string;
@@ -77,8 +92,29 @@ export interface DeploymentBindingDocument {
   };
 }
 
+/** Exact operator-authored JSON contract. Version 1 has no delivery field. */
+export type DeploymentBindingDocument = DeploymentBindingFields &
+  (
+    | {
+        readonly schemaVersion: typeof LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION;
+        readonly deliveryProvider?: never;
+      }
+    | {
+        readonly schemaVersion: typeof DEPLOYMENT_BINDING_SCHEMA_VERSION;
+        readonly deliveryProvider: DeliveryProviderBinding | null;
+      }
+  );
+
+/** Strictly parsed form used internally after compatibility normalization. */
+export interface NormalizedDeploymentBindingDocument extends DeploymentBindingFields {
+  readonly schemaVersion:
+    | typeof LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION
+    | typeof DEPLOYMENT_BINDING_SCHEMA_VERSION;
+  readonly deliveryProvider: DeliveryProviderBinding | null;
+}
+
 export interface ResolvedDeployment {
-  readonly binding: DeploymentBindingDocument;
+  readonly binding: NormalizedDeploymentBindingDocument;
   readonly bindingDigest: string;
   readonly bindingPath: string;
   readonly acceptedConfiguration: AcceptedConfigurationSnapshot;

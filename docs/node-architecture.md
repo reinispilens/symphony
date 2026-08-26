@@ -1,14 +1,14 @@
 # Node Symphony architecture
 
-Status: durable managed-workspace foundation implemented; estate proof/delivery pilot pending,
-2026-08-25
+Status: durable managed-workspace and delivery substrate implemented; governance composition and
+consumer pilot pending, 2026-08-26
 
 > [!IMPORTANT]
 > This document describes the managed Node implementation introduced with this change. The
 > [`repository-driver boundary`](repository-driver-boundary.md), durable state store, and pnpm
-> preparation driver are implemented here. Repository-owned hooks remain a transitional
-> compatibility path only. WCP protected proof, delivery, accepted doctrine pinning, and a product
-> pilot remain later estate phases.
+> preparation driver, trusted materializer, and delivery coordinator are implemented here.
+> Repository-owned hooks remain a transitional compatibility path only. Accepted governance
+> composition and a product pilot remain later estate phases.
 
 ## The system in one picture
 
@@ -21,6 +21,8 @@ Pinned Workflow Source ──▶ Orchestrator ──▶ SymphonyStateStore (SQLi
                                 ├── RepositoryDriver ──▶ managed Git worktree
                                 ├── PreparationDriver ─▶ offline pnpm + read-only seed
                                 ├── Agent Runner ──────▶ systemd scope ─▶ Codex + descendants
+                                ├── Materializer ──────▶ private Git index ─▶ immutable commit
+                                ├── Delivery saga ─────▶ trusted provider ─▶ Git host / WCP check
                                 └── Tracker Adapter ───▶ GitHub Projects through `gh`
 
 One process owns one binding, one repository, and one board; durable fencing prevents a second
@@ -263,17 +265,24 @@ boundaries without external mutation.
   and prompt copies cannot replace its pinned context.
 - A deterministic systemd user-scope boundary with lease-retention tests and an opt-in host probe
   proving a detached descendant is removed after its app-server parent exits.
+- A trusted source materializer that captures one bounded complete manifest, constructs Git objects
+  through a private index, and advances only the fenced managed branch from its pinned base.
+- A provider-neutral delivery coordinator whose durable effects bind push, PR, protected exact-head
+  checks/proof, grant-constrained merge, remote branch release, and guarded local cleanup. Provider
+  credentials remain in an operator-selected child process and never enter candidate execution or
+  WorkSession state.
 
 Gate: the complete `pnpm check` and `pnpm build` commands after the specification and operator docs
-are synchronized. This establishes the Symphony foundation; protected proof, delivery, and a real
-consumer journey remain separate estate capabilities.
+are synchronized. WCP protected proof v2 is an external input to the exact-head correlation; a real
+consumer journey remains a separate estate capability.
 
 ### Next estate gate — protected proof, delivery, and real target journey
 
 - Build WCP protected proof v2 and prove a capacity-one disposable-runner canary before enabling a
   product consumer.
-- Add durable delivery correlation in Symphony, then run the real Dyslexify profile with a
-  disposable board item and managed workspace.
+- Compose Symphony's delivered materialization/provider/coordinator ports into tracker-policy
+  reconciliation, then run the real Dyslexify profile with a disposable board item and managed
+  workspace.
 - Prove terminal cleanup, cancellation, retry, restart recovery, token separation, protected proof,
   and one complete `Todo → Human Review → Merging → Done` path.
 - Record commands, artifact IDs, and cleanup evidence rather than relying on a green summary.

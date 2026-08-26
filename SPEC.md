@@ -269,16 +269,20 @@ Fields (logical):
 - `doctrine_snapshot` (portable repository/path/revision/digest, or null only during the documented
   doctrine-migration compatibility window)
 - `accepted_configuration` (the immutable product-profile reference, resolved authoring-context
-  manifest and entries, and deployment-binding identity/digest; null only during the documented
-  tracker-configuration compatibility window)
+  manifest and entries, deployment-binding identity/digest, and optional version-1 compatibility
+  or exact product-owner delivery grant)
 - `controller_assignment` (kind, controller ID, monotonically increasing fencing generation)
 - ordered decisions/steering/exceptions, with accepted doctrine and `GP-xx` identity on exceptions
 - zero or one revisioned plan with acceptance criteria
 - zero or one human-owned workspace attachment, outside every Attempt and lease
 - zero or more child attempts
 - zero or one durable retry intent
-- append-only source-materialization records
-- protected-proof correlations and typed delivery state (behavior supplied by their extensions)
+- append-only source-materialization records, including the bounded exact input manifest used to
+  produce the tree and commit
+- protected-proof correlations and typed delivery state binding immutable local/remote head, PR,
+  exact-head required checks, merge, remote-branch release intent, and local cleanup
+- append-only terminal delivery history when a later Rework/fresh Attempt begins a new delivery;
+  prior evidence is archived in the same aggregate rather than overwritten
 
 The WorkSession is Symphony's aggregate root. Tracker comments, filesystem receipts, logs, and
 runtime snapshots MAY project it but MUST NOT become competing writers.
@@ -442,7 +446,7 @@ Managed configuration has two independently validated documents:
 2. An operator-owned deployment binding stored outside product source, Symphony state, and managed
    workspace roots.
 
-The version-1 repository profile is a strict JSON object with:
+The version-1 compatibility repository profile is a strict JSON object with:
 
 - `schemaVersion: 1`
 - `repositoryIdentity`: canonical `owner/repository`
@@ -451,11 +455,13 @@ The version-1 repository profile is a strict JSON object with:
 - `authoringContext.paths`: unique repository-relative context paths
 - `preparationClass`: `none` or `pnpm`
 
-It MUST NOT contain tracker configuration, credentials, source/state/workspace paths, branch
-namespace, concurrency, runtime executables/timeouts, process containment, protected proof, or
-delivery authority.
+Version 2 adds one required `deliveryGrant`: `authority` is `owner-gated` or `full-in-scope`,
+`governingPolicy` is one portable `.github` repository/path/exact-revision/digest reference, and
+`requiredChecks` is a non-empty sorted unique list. The profile still MUST NOT contain tracker
+configuration, credentials, source/state/workspace paths, branch namespace, concurrency, runtime
+executables/timeouts, process containment, or proof/delivery commands.
 
-The version-1 deployment binding is a strict JSON object with:
+The version-1 compatibility deployment binding is a strict JSON object with:
 
 - its schema version and stable binding ID;
 - product-profile repository identity, source root, repository-relative path, exact lowercase
@@ -470,6 +476,13 @@ The version-1 deployment binding is a strict JSON object with:
 - exact Codex executable and runtime timeouts; and
 - `systemd-user-scope` containment with a shutdown timeout and exact `systemd-run` and `systemctl`
   executable paths.
+
+Version 2 adds one operator-owned `deliveryProvider` with protocol version 1, an exact executable,
+positive timeout, and sorted unique uppercase secret-environment names. It MUST be present exactly
+when the accepted profile contains a delivery grant. The executable is resolved as a regular
+non-symlink file outside product, state, and workspace roots. Every named secret must exist, is
+scrubbed from the coding-agent child, and is passed only to the separately spawned provider; no
+credential value enters a WorkSession or provider request.
 
 Resolution MUST:
 
@@ -488,14 +501,47 @@ Resolution MUST:
    broaden the product-selected class.
 7. When `pnpm` is selected, prove the dependency seed is a real root disjoint from product source,
    Symphony state, and managed workspaces; normalize and digest the offline dependency policy.
-8. Construct one pinned workflow snapshot and record the profile, context, and binding
-   identities/digests on the WorkSession before its first Attempt.
+8. Construct one pinned workflow snapshot and record the profile, context, binding, and delivery
+   grant identities/digests on the WorkSession before its first Attempt.
 
 The pinned managed source MUST NOT live-reload. Changing a binding or accepted product revision
 requires a clean daemon restart. The binding may select an accepted product revision but MUST NOT
 rewrite its bytes or redefine product proof meaning.
 
-### 5.0.1 Managed runtime policy
+### 5.0.1 Trusted source materialization and delivery
+
+After a managed Attempt completes, its runtime lease MUST be released only after descendant
+quiescence is proven. Source materialization then operates under the recorded controller generation,
+Attempt ID, and managed-workspace lease token. It MUST:
+
+1. Record an idempotent intent before Git-ref mutation and acquire one cross-process workspace
+   fence under the operator state root.
+2. Independently verify the linked worktree, common Git directory, recorded branch/base, disabled
+   sparse checkout, absent executable filters, absent active `info/exclude`, and absent submodules
+   or nested repositories.
+3. Read tracked current bytes (including deletions) plus non-ignored untracked bytes without
+   following file symlinks; exclude untracked runtime/cache segments and refuse them when tracked.
+4. Bound paths, files, individual bytes, and aggregate bytes; record the complete ordered manifest,
+   content digests, Git blob identities, origin, kind, and mode.
+5. Build through a Symphony-owned temporary index with filters/hooks disabled, detect concurrent
+   mutation, write one deterministic commit, and atomically advance only the recorded branch from
+   its expected old SHA. A completed branch MUST never be rolled back by a later failed resume.
+
+Remote delivery is a durable saga. Every mutation has a stable WorkSession idempotency key and
+controller generation and runs through the separately trusted provider process. The request carries
+the pinned product grant, current tracker authority, repository identity, exact branch/base/head,
+and no credentials. The saga MUST observe before mutation, re-observe after every ambiguous process
+outcome, and never repeat an applied effect whose provider truth disappeared.
+
+Only the exact materialized commit may be pushed. PR identity must match its exact branch, base, and
+head. Every required check and admitted proof correlation must name that same head; an unrelated or
+stale green check is a refusal. `owner-gated` never produces a merge intent. `full-in-scope` may
+merge only when current tracker authority also permits it. After an exact merge is observed, a
+durable release intent removes only the exact remote branch, then the repository driver performs
+guarded local worktree/branch cleanup. Waiting for checks or owner action returns control to the
+daemon and MUST NOT consume an agent turn or sleep inside one.
+
+### 5.0.2 Managed runtime policy
 
 For a managed Git Attempt, repository files MUST NOT select the app-server command, approval
 policy, sandbox policy, writable roots, environment, process boundary, or cleanup behavior.
@@ -2886,6 +2932,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - CLI exits nonzero when startup fails or the host process exits abnormally
 - managed shutdown/recovery proves the deterministic descendant scope empty before a runtime lease
   is released or expired
+- trusted source materialization records the complete bounded input and advances only the fenced
+  managed branch from its expected old SHA
+- restart-safe delivery binds every remote mutation and protected proof to the immutable head,
+  pinned product-owner grant, current tracker authority, and durable effect intent
 
 ### 17.8 Real Integration Profile (RECOMMENDED)
 

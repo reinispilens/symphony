@@ -179,9 +179,11 @@ async function fixture(directory: string) {
           id: "preparation-test",
           digest: `sha256:${"1".repeat(64)}`,
         },
+        deliveryGrant: null,
       },
       codexExecutable: process.execPath,
       gitExecutable: "/usr/bin/git",
+      deliveryProvider: null,
       preparation: {
         nodeExecutable: process.execPath,
         pnpmEntryPoint: tools.pnpmEntryPoint,
