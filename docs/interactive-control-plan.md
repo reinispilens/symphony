@@ -1,7 +1,7 @@
 # Manual WorkSession MVP plan
 
 - Status: implementation complete with deterministic restart journey; live binding journey waits
-  for the final accepted-governance repin from Spec 001. Follow-on phase of
+  for the final accepted-governance repin and composed Dyslexify autonomous pilot. Follow-on phase of
   [`orchestration-estate-alignment-plan.md`](orchestration-estate-alignment-plan.md)
 - Recorded: 2026-08-25; revised after whole-plan state and authority review
 - Repository: Symphony
@@ -392,11 +392,12 @@ The unavoidable contract correction is that `--binding` appears on every command
 registry can locate an arbitrary private state root from a session UUID, and creating one would
 contradict the approved single-store boundary.
 
-One external rollout fact remains: Spec 001 must publish and the deployment must repin the final
-accepted doctrine that explicitly permits local human initiation. Until then, the deterministic
-journey is implementation evidence, not a claim that a live boardless session is governed by the
-final publication. That gate does not justify changes to `.github` files from this branch or any
-product-repository harness.
+Two rollout facts remain. Spec 001 must publish so the deployment can repin the final accepted
+doctrine that explicitly permits local human initiation, and the composed Dyslexify autonomous
+pilot must prove the shared authoring, proof, delivery, recovery, and cleanup path. Until then, the
+deterministic journey is implementation evidence, not a claim that a live boardless session is an
+accepted estate capability. Those gates do not justify changes to `.github` files from this branch
+or any product-repository harness.
 
 ## Lifetime of this document
 
