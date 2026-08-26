@@ -7,6 +7,7 @@ import type { Issue } from "../domain/issue.js";
 import { SymphonyError, errorMessage } from "../errors.js";
 import { nullLogger, type Logger } from "../observability/logger.js";
 import { trustedGitArguments, trustedGitEnvironment } from "./git-process.js";
+import { parseRemoteIdentity } from "./remote-identity.js";
 import type {
   ManagedWorkspaceLease,
   WorkSessionSnapshot,
@@ -211,43 +212,8 @@ function profileDigest(config: WorkspaceLifecycleConfig): string {
   return `sha256:${createHash("sha256").update(encoded).digest("hex")}`;
 }
 
-interface RemoteIdentity {
-  readonly hostname: string;
-  readonly repositoryIdentity: string;
-}
-
 function managedGitExecutable(config: RepositoryHostConfig): string {
   return config.deployment?.gitExecutable ?? "git";
-}
-
-function remoteIdentity(remoteUrl: string): RemoteIdentity | null {
-  let normalized = remoteUrl.trim().replace(/\/+$/u, "");
-  if (normalized.endsWith(".git")) normalized = normalized.slice(0, -4);
-  let hostname: string | null = null;
-  const scp = normalized.match(/^(?:[^@\s]+@)?([^:/\s]+):(.+)$/u);
-  if (scp !== null && !normalized.includes("://")) {
-    hostname = scp[1]?.toLowerCase() ?? null;
-    normalized = scp[2] ?? normalized;
-  }
-  try {
-    if (normalized.includes("://")) {
-      const parsed = new URL(normalized);
-      hostname = parsed.host.toLowerCase();
-      normalized = parsed.pathname;
-    }
-  } catch {
-    return null;
-  }
-  if (hostname === null || hostname === "") return null;
-  const segments = normalized
-    .replace(/^\/+|\/+$/gu, "")
-    .split("/")
-    .filter((segment) => segment !== "");
-  if (segments.length < 2) return null;
-  return {
-    hostname,
-    repositoryIdentity: `${segments.at(-2)}/${segments.at(-1)}`,
-  };
 }
 
 async function resolvedSourceRoot(
@@ -304,7 +270,7 @@ async function verifyRepositoryIdentity(
     "--get",
     "remote.origin.url",
   ]);
-  const actual = remoteIdentity(remote);
+  const actual = parseRemoteIdentity(remote);
   if (
     actual?.hostname !== config.repository.hostname.toLowerCase() ||
     actual.repositoryIdentity.toLowerCase() !==

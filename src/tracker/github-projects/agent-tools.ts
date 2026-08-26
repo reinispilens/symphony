@@ -325,6 +325,16 @@ export class GitHubProjectsAgentToolRuntime implements AgentToolRuntime {
     record(root["deleteIssueComment"], "deleteIssueComment");
   }
 
+  async setStatusForOrchestration(target: string): Promise<void> {
+    const result = await this.#setStatus(target);
+    if (!result.success) {
+      throw new TrackerError(
+        "tracker_response",
+        `Could not select orchestration status '${target}': ${result.error.message}`,
+      );
+    }
+  }
+
   async refuse(reason: string, failureState: string): Promise<void> {
     const cleanReason = reason.trim();
     if (cleanReason === "" || failureState.trim() === "") {

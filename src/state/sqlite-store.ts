@@ -1178,6 +1178,17 @@ export class SqliteSymphonyStateStore implements SymphonyStateStore {
         input.controllerGeneration,
         "start an attempt for",
       );
+      if (
+        document.configuration !== null &&
+        (document.doctrine === null ||
+          document.configuration.governanceManifest === null ||
+          document.configuration.trackerPolicy === null)
+      ) {
+        throw new StateStoreError(
+          "input_conflict",
+          `WorkSession ${document.id} cannot start a managed Attempt without pinned accepted governance`,
+        );
+      }
       if (document.humanAttachment !== null) {
         throw new StateStoreError(
           "workspace_conflict",

@@ -7,7 +7,10 @@ import {
   ExternalDeliveryProvider,
   type DeliveryProviderRequest,
 } from "../../src/delivery/provider.js";
-import { withTempDirectory } from "../support/factories.js";
+import {
+  protectedProofAuthorityFixture,
+  withTempDirectory,
+} from "../support/factories.js";
 
 function request(): DeliveryProviderRequest {
   return {
@@ -27,11 +30,21 @@ function request(): DeliveryProviderRequest {
       },
       requiredChecks: ["proof / Protected final"],
     },
+    proofAuthority: protectedProofAuthorityFixture(),
     tracker: {
       origin: "tracker",
       issueId: "issue-1",
       state: "Human Review",
       stateVersion: "state-3",
+      permittedOperations: [
+        "materialize",
+        "push",
+        "openPullRequest",
+        "observeChecks",
+        "observeMerge",
+        "releaseRemoteBranch",
+        "cleanupWorkspace",
+      ],
       permitsDelivery: true,
       permitsMerge: false,
       permitsCleanup: true,
@@ -57,6 +70,8 @@ describe("ExternalDeliveryProvider", () => {
           'process.stdin.on("end", () => {',
           "  const request = JSON.parse(input);",
           '  if (process.env.DELIVERY_TOKEN !== "operator-secret") process.exit(91);',
+          '  if (process.env.SYMPHONY_GIT_EXECUTABLE !== "/usr/bin/git") process.exit(94);',
+          '  if (process.env.SYMPHONY_GITHUB_HOSTNAME !== "github.com") process.exit(95);',
           "  if (process.env.CANDIDATE_SECRET !== undefined) process.exit(92);",
           '  if (JSON.stringify(request).includes("operator-secret")) process.exit(93);',
           "  const head = request.immutableHeadSha;",
@@ -100,6 +115,8 @@ describe("ExternalDeliveryProvider", () => {
         executable,
         timeoutMs: 2_000,
         secretEnvironmentNames: ["DELIVERY_TOKEN"],
+        gitExecutable: "/usr/bin/git",
+        githubHostname: "github.com",
         environment: {
           PATH: process.env["PATH"],
           DELIVERY_TOKEN: "operator-secret",
@@ -138,6 +155,71 @@ describe("ExternalDeliveryProvider", () => {
         code: "delivery_provider_failed",
         message: expect.stringContaining("ambiguous"),
       });
+    });
+  });
+
+  it("redacts declared credentials from provider failure output", async () => {
+    await withTempDirectory(async (directory) => {
+      const executable = path.join(directory, "leaking-provider.mjs");
+      await writeFile(
+        executable,
+        `#!${process.execPath}\nprocess.stderr.write(\`provider saw ${"${process.env.DELIVERY_TOKEN}"}\\n\`);\nprocess.exit(19);\n`,
+      );
+      await chmod(executable, 0o755);
+      const provider = new ExternalDeliveryProvider({
+        executable,
+        timeoutMs: 2_000,
+        secretEnvironmentNames: ["DELIVERY_TOKEN"],
+        environment: {
+          PATH: process.env["PATH"],
+          DELIVERY_TOKEN: "operator-secret-must-not-leak",
+        },
+      });
+
+      let caught: unknown;
+      try {
+        await provider.execute(request());
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ code: "delivery_provider_failed" });
+      expect((caught as Error).message).toContain("[REDACTED]");
+      expect((caught as Error).message).not.toContain(
+        "operator-secret-must-not-leak",
+      );
+    });
+  });
+
+  it("does not retain an unredacted structured refusal as an error cause", async () => {
+    await withTempDirectory(async (directory) => {
+      const executable = path.join(directory, "refusing-provider.mjs");
+      await writeFile(
+        executable,
+        `#!${process.execPath}\nprocess.stdout.write(JSON.stringify({ protocolVersion: 1, outcome: "refused", reason: \`credential ${"${process.env.DELIVERY_TOKEN}"} was rejected\` }));\n`,
+      );
+      await chmod(executable, 0o755);
+      const provider = new ExternalDeliveryProvider({
+        executable,
+        timeoutMs: 2_000,
+        secretEnvironmentNames: ["DELIVERY_TOKEN"],
+        environment: {
+          PATH: process.env["PATH"],
+          DELIVERY_TOKEN: "structured-secret-must-not-leak",
+        },
+      });
+
+      let caught: unknown;
+      try {
+        await provider.execute(request());
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ code: "delivery_provider_refused" });
+      expect((caught as Error).message).toContain("[REDACTED]");
+      expect((caught as Error).message).not.toContain(
+        "structured-secret-must-not-leak",
+      );
+      expect((caught as Error).cause).toBeUndefined();
     });
   });
 });

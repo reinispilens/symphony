@@ -46,8 +46,6 @@ export class DefaultTrackerFactory {
       timeoutMs: config.timeoutMs,
     });
     const adapter = new GitHubProjectsAdapter({
-      activeStates: workflow.config.tracker.activeStates,
-      freshAttemptStates: workflow.config.tracker.freshAttemptStates,
       client,
       config,
       ...(this.#logger === undefined ? {} : { logger: this.#logger }),

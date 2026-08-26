@@ -2,13 +2,16 @@ import type { JsonObject } from "../shared/json.js";
 import type {
   AcceptedConfigurationSnapshot,
   DeliveryGrantSnapshot,
+  ProtectedProofAuthoritySnapshot,
 } from "../state/model.js";
+import type { ResolvedGovernance } from "../governance/model.js";
 import type { ServiceConfig } from "../workflow/config.js";
 import type { WorkflowSnapshot } from "../workflow/store.js";
 
 export const REPOSITORY_PROFILE_SCHEMA_VERSION = 2;
 export const LEGACY_REPOSITORY_PROFILE_SCHEMA_VERSION = 1;
-export const DEPLOYMENT_BINDING_SCHEMA_VERSION = 2;
+export const DEPLOYMENT_BINDING_SCHEMA_VERSION = 3;
+export const DELIVERY_DEPLOYMENT_BINDING_SCHEMA_VERSION = 2;
 export const LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION = 1;
 
 export interface RepositoryProfileDocument {
@@ -31,6 +34,29 @@ export interface DeliveryProviderBinding {
   readonly executable: string;
   readonly timeoutMs: number;
   readonly secretEnvironmentNames: readonly string[];
+  /** Absent in the authored version-2 compatibility schema; normalized to null. */
+  readonly proofAuthority?: ProtectedProofAuthoritySnapshot | null;
+}
+
+export interface LegacyTrackerBinding {
+  readonly kind: string;
+  readonly provider: JsonObject;
+  readonly requiredLabels: readonly string[];
+  readonly excludedLabels: readonly string[];
+  readonly activeStates: readonly string[];
+  readonly terminalStates: readonly string[];
+  readonly freshAttemptStates: readonly string[];
+  readonly freshAttemptFailureState: string | null;
+}
+
+export interface GovernanceBinding {
+  readonly repositoryIdentity: string;
+  readonly sourceRoot: string;
+  readonly manifest: {
+    readonly path: string;
+    readonly revision: string;
+    readonly digest: string;
+  };
 }
 
 interface DeploymentBindingFields {
@@ -46,16 +72,6 @@ interface DeploymentBindingFields {
   readonly workspaceRoot: string;
   readonly branchPrefix: string;
   readonly gitExecutable: string;
-  readonly tracker: {
-    readonly kind: string;
-    readonly provider: JsonObject;
-    readonly requiredLabels: readonly string[];
-    readonly excludedLabels: readonly string[];
-    readonly activeStates: readonly string[];
-    readonly terminalStates: readonly string[];
-    readonly freshAttemptStates: readonly string[];
-    readonly freshAttemptFailureState: string | null;
-  };
   readonly polling: {
     readonly intervalMs: number;
   };
@@ -92,15 +108,30 @@ interface DeploymentBindingFields {
   };
 }
 
-/** Exact operator-authored JSON contract. Version 1 has no delivery field. */
+interface ThinTrackerBinding {
+  readonly kind: string;
+  readonly provider: JsonObject;
+}
+
+/** Exact operator-authored JSON contract. */
 export type DeploymentBindingDocument = DeploymentBindingFields &
   (
     | {
         readonly schemaVersion: typeof LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION;
+        readonly tracker: LegacyTrackerBinding;
+        readonly governance?: never;
         readonly deliveryProvider?: never;
       }
     | {
+        readonly schemaVersion: typeof DELIVERY_DEPLOYMENT_BINDING_SCHEMA_VERSION;
+        readonly tracker: LegacyTrackerBinding;
+        readonly governance?: never;
+        readonly deliveryProvider: DeliveryProviderBinding | null;
+      }
+    | {
         readonly schemaVersion: typeof DEPLOYMENT_BINDING_SCHEMA_VERSION;
+        readonly tracker: ThinTrackerBinding;
+        readonly governance: GovernanceBinding;
         readonly deliveryProvider: DeliveryProviderBinding | null;
       }
   );
@@ -109,7 +140,11 @@ export type DeploymentBindingDocument = DeploymentBindingFields &
 export interface NormalizedDeploymentBindingDocument extends DeploymentBindingFields {
   readonly schemaVersion:
     | typeof LEGACY_DEPLOYMENT_BINDING_SCHEMA_VERSION
+    | typeof DELIVERY_DEPLOYMENT_BINDING_SCHEMA_VERSION
     | typeof DEPLOYMENT_BINDING_SCHEMA_VERSION;
+  readonly tracker: LegacyTrackerBinding;
+  /** Null only for the version-1 and version-2 compatibility schemas. */
+  readonly governance: GovernanceBinding | null;
   readonly deliveryProvider: DeliveryProviderBinding | null;
 }
 
@@ -118,6 +153,8 @@ export interface ResolvedDeployment {
   readonly bindingDigest: string;
   readonly bindingPath: string;
   readonly acceptedConfiguration: AcceptedConfigurationSnapshot;
+  /** Null only for the version-1 and version-2 compatibility schemas. */
+  readonly governance: ResolvedGovernance | null;
   readonly profile: RepositoryProfileDocument;
   readonly serviceConfig: ServiceConfig;
   readonly workflow: WorkflowSnapshot;

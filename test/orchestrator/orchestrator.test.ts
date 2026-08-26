@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { AgentEvent } from "../../src/agent/events.js";
@@ -6,11 +8,22 @@ import type {
   AgentRunOptions,
   AgentRunResult,
 } from "../../src/agent/runner.js";
+import type {
+  DeliveryExecutionInput,
+  DeliveryExecutionOutcome,
+  DeliveryExecutionPort,
+} from "../../src/delivery/execution.js";
 import type { Issue } from "../../src/domain/issue.js";
 import { SymphonyError } from "../../src/errors.js";
+import { deriveTrackerPolicyRuntime } from "../../src/governance/tracker-policy.js";
 import type { Logger } from "../../src/observability/logger.js";
 import type { RepositoryCleanupAuthority } from "../../src/repository/driver.js";
 import { SqliteSymphonyStateStore } from "../../src/state/sqlite-store.js";
+import type {
+  AcceptedConfigurationSnapshot,
+  DeliveryState,
+  WorkSessionSnapshot,
+} from "../../src/state/model.js";
 import type {
   OrchestratorClock,
   TimerHandle,
@@ -23,10 +36,16 @@ import {
 import type {
   FreshAttemptControl,
   TrackerAdapter,
+  TrackerStateControl,
 } from "../../src/tracker/adapter.js";
 import type { ServiceConfig } from "../../src/workflow/config.js";
 import type { WorkflowSnapshot } from "../../src/workflow/store.js";
-import { issue, withTempDirectory } from "../support/factories.js";
+import {
+  acceptedGovernanceFixture,
+  issue,
+  protectedProofAuthorityFixture,
+  withTempDirectory,
+} from "../support/factories.js";
 
 const START_MS = Date.parse("2026-08-23T10:00:00Z");
 
@@ -69,6 +88,7 @@ type FakeResponse<T> = T | Error;
 class FakeTracker implements TrackerAdapter {
   readonly idCalls: string[][] = [];
   readonly stateCalls: string[][] = [];
+  readonly stateControl?: (issue: Issue) => TrackerStateControl;
   readonly #idResponses: FakeResponse<readonly Issue[]>[];
   readonly #stateResponses: FakeResponse<readonly Issue[]>[];
   readonly #freshControl: FreshAttemptControl | null;
@@ -77,10 +97,14 @@ class FakeTracker implements TrackerAdapter {
     readonly idResponses?: FakeResponse<readonly Issue[]>[];
     readonly stateResponses?: FakeResponse<readonly Issue[]>[];
     readonly freshControl?: FreshAttemptControl;
+    readonly stateControl?: TrackerStateControl;
   }) {
     this.#idResponses = [...(options.idResponses ?? [])];
     this.#stateResponses = [...(options.stateResponses ?? [])];
     this.#freshControl = options.freshControl ?? null;
+    if (options.stateControl !== undefined) {
+      this.stateControl = () => options.stateControl!;
+    }
   }
 
   async fetchIssuesByStates(
@@ -124,6 +148,7 @@ class FakeAgentRunner implements AgentExecutionPort {
   autoRejectOnAbort = true;
   quiescenceFailure: Error | null = null;
   onQuiesce: (() => void) | null = null;
+  onRun: ((options: AgentRunOptions) => void) | null = null;
 
   async cleanupWorkspace(
     cleanedIssue: Issue,
@@ -146,6 +171,7 @@ class FakeAgentRunner implements AgentExecutionPort {
   }
 
   run(options: AgentRunOptions): Promise<AgentRunResult> {
+    this.onRun?.(options);
     return new Promise((resolve, reject) => {
       const pending: PendingRun = {
         options,
@@ -203,6 +229,23 @@ class FakeAgentRunner implements AgentExecutionPort {
   async emit(index: number, event: AgentEvent): Promise<void> {
     const handler = this.runs[index]?.options.onEvent;
     await handler?.(event);
+  }
+}
+
+class FakeDeliveryExecution implements DeliveryExecutionPort {
+  readonly calls: DeliveryExecutionInput[] = [];
+
+  constructor(
+    private readonly handler: (
+      input: DeliveryExecutionInput,
+    ) => Promise<DeliveryExecutionOutcome>,
+  ) {}
+
+  async reconcile(
+    input: DeliveryExecutionInput,
+  ): Promise<DeliveryExecutionOutcome> {
+    this.calls.push(input);
+    return this.handler(input);
   }
 }
 
@@ -292,6 +335,138 @@ function serviceConfig(
   };
 }
 
+function governedConfiguration(
+  authority: "owner-gated" | "full-in-scope" = "owner-gated",
+): AcceptedConfigurationSnapshot {
+  const governance = acceptedGovernanceFixture();
+  return {
+    productProfile: {
+      repositoryIdentity: "acme/widgets",
+      path: ".symphony/repository-profile.json",
+      revision: "1".repeat(40),
+      digest: `sha256:${"1".repeat(64)}`,
+    },
+    authoringContext: {
+      repositoryIdentity: "acme/widgets",
+      revision: "1".repeat(40),
+      manifestDigest: `sha256:${"2".repeat(64)}`,
+      entries: [],
+    },
+    deploymentBinding: {
+      id: "widgets-test",
+      digest: `sha256:${"3".repeat(64)}`,
+    },
+    governanceManifest: governance.governanceManifest,
+    trackerPolicy: governance.trackerPolicy,
+    deliveryGrant: {
+      authority,
+      governingPolicy: governance.trackerPolicy.source,
+      requiredChecks: ["proof / Protected final"],
+    },
+    proofAuthority: protectedProofAuthorityFixture(),
+  };
+}
+
+function governedServiceConfig(
+  authority: "owner-gated" | "full-in-scope" = "owner-gated",
+): ServiceConfig {
+  const compatibility = serviceConfig({ freshAttempt: true });
+  const governance = acceptedGovernanceFixture();
+  const acceptedConfiguration = governedConfiguration(authority);
+  const projection = deriveTrackerPolicyRuntime(governance.trackerPolicy);
+  return {
+    ...compatibility,
+    deployment: {
+      bindingId: "widgets-test",
+      bindingDigest: acceptedConfiguration.deploymentBinding.digest,
+      bindingPath: "/operator/widgets-binding.json",
+      sourceRoot: "/repositories/widgets",
+      stateRoot: "/state/widgets",
+      acceptedConfiguration,
+      doctrine: governance.doctrine,
+      codexExecutable: "/usr/bin/codex",
+      gitExecutable: "/usr/bin/git",
+      deliveryProvider: null,
+      preparation: null,
+      processContainment: {
+        provider: "systemd-user-scope",
+        shutdownTimeoutMs: 10_000,
+        systemdRunExecutable: "/usr/bin/systemd-run",
+        systemctlExecutable: "/usr/bin/systemctl",
+      },
+    },
+    tracker: {
+      ...compatibility.tracker,
+      requiredLabels: projection.requiredLabels,
+      excludedLabels: projection.excludedLabels,
+      activeStates: projection.activeStates,
+      terminalStates: projection.terminalStates,
+      freshAttemptStates: projection.freshAttemptStates,
+      freshAttemptFailureState: projection.freshAttemptFailureState,
+    },
+    repository: {
+      identity: "acme/widgets",
+      hostname: "github.com",
+      baseRef: "refs/heads/main",
+      branchPrefix: "symphony/",
+      profileDigest: acceptedConfiguration.productProfile.digest,
+    },
+  };
+}
+
+function governedTask(
+  identifier: string,
+  overrides: Partial<Issue> = {},
+): Issue {
+  return task(identifier, {
+    labels: ["driver:symphony"],
+    ...overrides,
+  });
+}
+
+function seedGovernedTrackerSession(
+  stateStore: SqliteSymphonyStateStore,
+  active: Issue,
+  config: ServiceConfig,
+): WorkSessionSnapshot {
+  const deployment = config.deployment;
+  const repository = config.repository;
+  if (deployment === null || repository === null) {
+    throw new Error("governed test configuration is incomplete");
+  }
+  return stateStore.getOrCreateTrackerSession({
+    trackerKind: config.tracker.kind,
+    repositoryIdentity: repository.identity,
+    issueId: active.id,
+    issueIdentifier: active.identifier,
+    issueUrl: active.url,
+    intent: active.title,
+    controllerId: `tracker:${config.tracker.kind}:${repository.identity}`,
+    doctrine: deployment.doctrine,
+    configuration: deployment.acceptedConfiguration,
+    now: new Date(START_MS).toISOString(),
+  });
+}
+
+function completedDelivery(): DeliveryState {
+  return {
+    phase: "completed",
+    materializationId: "materialization-1",
+    branch: "symphony/widgets-1",
+    pullRequest: "42",
+    immutableHeadSha: "d".repeat(40),
+    expectedRemoteHeadSha: null,
+    remoteHeadSha: null,
+    requiredChecks: [],
+    mergeSha: "e".repeat(40),
+    cleanupStatus: "completed",
+    releaseIntentId: "release-1",
+    lastError: null,
+    startedAt: new Date(START_MS).toISOString(),
+    updatedAt: new Date(START_MS).toISOString(),
+  };
+}
+
 function workflow(config = serviceConfig()): WorkflowSnapshot {
   return {
     config,
@@ -330,6 +505,7 @@ async function settle(orchestrator: Orchestrator): Promise<void> {
 
 function createHarness(options: {
   readonly config?: ServiceConfig;
+  readonly deliveryExecution?: DeliveryExecutionPort;
   readonly stateStore?: SqliteSymphonyStateStore;
   readonly tracker: FakeTracker;
 }) {
@@ -341,6 +517,9 @@ function createHarness(options: {
   const orchestrator = new Orchestrator({
     agentRunner,
     clock,
+    ...(options.deliveryExecution === undefined
+      ? {}
+      : { deliveryExecution: options.deliveryExecution }),
     logger: logger(),
     stateStore,
     trackerFactory: () => options.tracker,
@@ -379,6 +558,399 @@ function seedExpiredRuntimeLease(
 }
 
 describe("Orchestrator", () => {
+  it.each([
+    ["Human Review", "owner-gated", false],
+    ["Merging", "full-in-scope", true],
+  ] as const)(
+    "reconciles the %s delivery lane without launching Codex",
+    async (state, authority, permitsMerge) => {
+      const config = governedServiceConfig(authority);
+      const candidate = governedTask(`DELIVERY-${state}`, {
+        state,
+        dispatchable: true,
+      });
+      const stateStore = SqliteSymphonyStateStore.openInMemory();
+      seedGovernedTrackerSession(stateStore, candidate, config);
+      const deliveryExecution = new FakeDeliveryExecution(async (input) => {
+        const session = stateStore.getSession(input.sessionId);
+        if (session === null) throw new Error("missing test WorkSession");
+        return { status: "awaiting_owner", session };
+      });
+      const harness = createHarness({
+        config,
+        deliveryExecution,
+        stateStore,
+        tracker: new FakeTracker({ stateResponses: [[candidate], []] }),
+      });
+
+      await harness.orchestrator.start();
+      await settle(harness.orchestrator);
+
+      expect(harness.agentRunner.runs).toHaveLength(0);
+      expect(deliveryExecution.calls).toHaveLength(1);
+      expect(deliveryExecution.calls[0]?.tracker).toMatchObject({
+        state,
+        permitsMerge,
+      });
+      expect(
+        deliveryExecution.calls[0]?.tracker.permittedOperations.includes(
+          "mergePullRequest",
+        ),
+      ).toBe(permitsMerge);
+      await harness.orchestrator.stop();
+    },
+  );
+
+  it("moves a successful authoring turn into delivery instead of scheduling another agent turn", async () => {
+    const config = governedServiceConfig();
+    const active = governedTask("AUTHOR-THEN-DELIVER");
+    const review = {
+      ...active,
+      state: "Human Review",
+      state_version: "state-version-2",
+      dispatchable: true,
+    };
+    const stateStore = SqliteSymphonyStateStore.openInMemory();
+    const deliveryExecution = new FakeDeliveryExecution(async (input) => {
+      const session = stateStore.getSession(input.sessionId);
+      if (session === null) throw new Error("missing test WorkSession");
+      return { status: "awaiting_owner", session };
+    });
+    const harness = createHarness({
+      config,
+      deliveryExecution,
+      stateStore,
+      tracker: new FakeTracker({
+        stateResponses: [[], [active]],
+        idResponses: [[review]],
+      }),
+    });
+
+    await harness.orchestrator.start();
+    await settle(harness.orchestrator);
+    expect(harness.agentRunner.runs).toHaveLength(1);
+    expect(harness.agentRunner.runs[0]?.options.agentStatusTargets).toEqual([
+      "In Progress",
+      "Human Review",
+    ]);
+    expect(harness.orchestrator.snapshot().running[0]?.governance).toEqual({
+      doctrine: {
+        repository_identity: "reinispilens/.github",
+        path: "agent-system/golden-principles.md",
+        revision: "b".repeat(40),
+        digest: `sha256:${"1".repeat(64)}`,
+      },
+      manifest: {
+        repository_identity: "reinispilens/.github",
+        path: "agent-system/accepted-governance.json",
+        revision: "c".repeat(40),
+        digest: `sha256:${"3".repeat(64)}`,
+      },
+      tracker_policy: {
+        repository_identity: "reinispilens/.github",
+        path: "agent-system/tracker-policy.json",
+        revision: "b".repeat(40),
+        digest: `sha256:${"2".repeat(64)}`,
+      },
+    });
+
+    harness.agentRunner.resolve(0, review);
+    await settle(harness.orchestrator);
+
+    expect(deliveryExecution.calls).toHaveLength(1);
+    expect(deliveryExecution.calls[0]?.tracker.state).toBe("Human Review");
+    expect(harness.agentRunner.runs).toHaveLength(1);
+    expect(harness.orchestrator.snapshot().counts).toEqual({
+      running: 0,
+      retrying: 0,
+    });
+    await harness.orchestrator.stop();
+  });
+
+  it("reconciles a persisted delivery-only WorkSession immediately after restart", async () => {
+    await withTempDirectory(async (directory) => {
+      const databasePath = path.join(directory, "state.sqlite");
+      const config = governedServiceConfig();
+      const review = governedTask("RESTART-DELIVERY", {
+        state: "Human Review",
+        dispatchable: true,
+      });
+      const firstStore = SqliteSymphonyStateStore.open(databasePath);
+      seedGovernedTrackerSession(firstStore, review, config);
+      firstStore.close();
+
+      const restartedStore = SqliteSymphonyStateStore.open(databasePath);
+      const deliveryExecution = new FakeDeliveryExecution(async (input) => {
+        const session = restartedStore.getSession(input.sessionId);
+        if (session === null) throw new Error("missing test WorkSession");
+        return { status: "awaiting_owner", session };
+      });
+      const harness = createHarness({
+        config,
+        deliveryExecution,
+        stateStore: restartedStore,
+        tracker: new FakeTracker({ stateResponses: [[review], []] }),
+      });
+
+      await harness.orchestrator.start();
+      await settle(harness.orchestrator);
+
+      expect(deliveryExecution.calls).toHaveLength(1);
+      expect(harness.agentRunner.runs).toHaveLength(0);
+      await harness.orchestrator.stop();
+      restartedStore.close();
+    });
+  });
+
+  it("interprets a recovered WorkSession with its pinned policy after the deployment advances", async () => {
+    const acceptedConfig = governedServiceConfig();
+    const cancelled = governedTask("PINNED-CANCELLED", {
+      state: "Cancelled",
+      dispatchable: false,
+    });
+    const stateStore = SqliteSymphonyStateStore.openInMemory();
+    const seeded = seedGovernedTrackerSession(
+      stateStore,
+      cancelled,
+      acceptedConfig,
+    );
+    const oldPolicy =
+      acceptedConfig.deployment!.acceptedConfiguration.trackerPolicy!;
+    const advancedPolicy = {
+      ...oldPolicy,
+      source: {
+        ...oldPolicy.source,
+        revision: "f".repeat(40),
+        digest: `sha256:${"f".repeat(64)}`,
+      },
+      lanes: oldPolicy.lanes.filter((lane) => lane.name !== "Cancelled"),
+    };
+    const currentConfig: ServiceConfig = {
+      ...acceptedConfig,
+      tracker: {
+        ...acceptedConfig.tracker,
+        terminalStates: ["Done"],
+      },
+      deployment: {
+        ...acceptedConfig.deployment!,
+        acceptedConfiguration: {
+          ...acceptedConfig.deployment!.acceptedConfiguration,
+          trackerPolicy: advancedPolicy,
+          deliveryGrant: {
+            ...acceptedConfig.deployment!.acceptedConfiguration.deliveryGrant!,
+            governingPolicy: advancedPolicy.source,
+          },
+        },
+      },
+    };
+    const harness = createHarness({
+      config: currentConfig,
+      stateStore,
+      tracker: new FakeTracker({ stateResponses: [[cancelled], []] }),
+    });
+
+    await harness.orchestrator.start();
+    await settle(harness.orchestrator);
+
+    expect(harness.agentRunner.cleanups).toHaveLength(1);
+    expect(stateStore.getSession(seeded.id)?.status).toBe("cancelled");
+    await harness.orchestrator.stop();
+  });
+
+  it("uses a recovered WorkSession's pinned fresh-attempt meaning after deployment advances", async () => {
+    const acceptedConfig = governedServiceConfig();
+    const rework = governedTask("PINNED-REWORK", {
+      state: "Rework",
+      state_version: "rework-state-version-1",
+      dispatchable: true,
+    });
+    const stateStore = SqliteSymphonyStateStore.openInMemory();
+    seedGovernedTrackerSession(stateStore, rework, acceptedConfig);
+    const oldPolicy =
+      acceptedConfig.deployment!.acceptedConfiguration.trackerPolicy!;
+    const advancedPolicy = {
+      ...oldPolicy,
+      source: {
+        ...oldPolicy.source,
+        revision: "f".repeat(40),
+        digest: `sha256:${"f".repeat(64)}`,
+      },
+      lanes: oldPolicy.lanes.filter((lane) => lane.name !== "Rework"),
+    };
+    const currentConfig: ServiceConfig = {
+      ...acceptedConfig,
+      tracker: {
+        ...acceptedConfig.tracker,
+        activeStates: acceptedConfig.tracker.activeStates.filter(
+          (state) => state !== "Rework",
+        ),
+        freshAttemptStates: [],
+      },
+      deployment: {
+        ...acceptedConfig.deployment!,
+        acceptedConfiguration: {
+          ...acceptedConfig.deployment!.acceptedConfiguration,
+          trackerPolicy: advancedPolicy,
+          deliveryGrant: {
+            ...acceptedConfig.deployment!.acceptedConfiguration.deliveryGrant!,
+            governingPolicy: advancedPolicy.source,
+          },
+        },
+      },
+    };
+    const harness = createHarness({
+      config: currentConfig,
+      stateStore,
+      tracker: new FakeTracker({ stateResponses: [[], [rework]] }),
+    });
+
+    await harness.orchestrator.start();
+    await settle(harness.orchestrator);
+
+    expect(harness.agentRunner.runs).toHaveLength(1);
+    expect(harness.agentRunner.runs[0]?.options).toMatchObject({
+      requiresFreshAttempt: true,
+    });
+    expect(harness.agentRunner.runs[0]?.options.freshAttemptGeneration).toMatch(
+      /^[a-f0-9]{64}$/u,
+    );
+    await harness.orchestrator.stop();
+  });
+
+  it("durably selects Done only after delivery reports guarded cleanup complete", async () => {
+    const config = governedServiceConfig();
+    const review = governedTask("DELIVERY-DONE", {
+      state: "Human Review",
+      dispatchable: true,
+    });
+    const stateStore = SqliteSymphonyStateStore.openInMemory();
+    const seeded = seedGovernedTrackerSession(stateStore, review, config);
+    const transition = vi.fn<TrackerStateControl["transition"]>(
+      async (targetState, expectedStateVersion) => ({
+        ...review,
+        state: targetState,
+        state_version: `${expectedStateVersion ?? "none"}-done`,
+      }),
+    );
+    const deliveryExecution = new FakeDeliveryExecution(async (input) => {
+      const session = stateStore.getSession(input.sessionId);
+      if (session === null) throw new Error("missing test WorkSession");
+      return {
+        status: "completed",
+        session: { ...session, delivery: completedDelivery() },
+      };
+    });
+    const harness = createHarness({
+      config,
+      deliveryExecution,
+      stateStore,
+      tracker: new FakeTracker({
+        stateResponses: [[review], []],
+        stateControl: { transition },
+      }),
+    });
+
+    await harness.orchestrator.start();
+    await settle(harness.orchestrator);
+
+    expect(transition).toHaveBeenCalledWith("Done", review.state_version);
+    expect(stateStore.getSession(seeded.id)?.status).toBe("completed");
+    expect(stateStore.listPendingEffects()).toEqual([]);
+    expect(harness.agentRunner.runs).toHaveLength(0);
+    await harness.orchestrator.stop();
+  });
+
+  it("adopts an already-applied Done effect only when current tracker truth is Done", async () => {
+    const config = governedServiceConfig();
+    const done = governedTask("DELIVERY-DONE-RECOVERY", {
+      state: "Done",
+      state_version: "done-state-version-1",
+      dispatchable: false,
+    });
+    const stateStore = SqliteSymphonyStateStore.openInMemory();
+    const seeded = seedGovernedTrackerSession(stateStore, done, config);
+    const head = "d".repeat(40);
+    const effect = stateStore.enqueueEffect({
+      sessionId: seeded.id,
+      controllerGeneration: seeded.controller.generation,
+      kind: "tracker.delivery_completed",
+      idempotencyKey: `tracker:delivery-completed:${head}`,
+      payload: {
+        issue_id: done.id,
+        immutable_head_sha: head,
+        target_state: "Done",
+      },
+      now: new Date(START_MS).toISOString(),
+    });
+    stateStore.finishEffect({
+      effectId: effect.id,
+      controllerGeneration: seeded.controller.generation,
+      status: "applied",
+      result: { state: "Done" },
+      now: new Date(START_MS + 1).toISOString(),
+    });
+    const transition = vi.fn<TrackerStateControl["transition"]>();
+    const deliveryExecution = new FakeDeliveryExecution(async (input) => {
+      const session = stateStore.getSession(input.sessionId);
+      if (session === null) throw new Error("missing test WorkSession");
+      return {
+        status: "completed",
+        session: { ...session, delivery: completedDelivery() },
+      };
+    });
+    const harness = createHarness({
+      config,
+      deliveryExecution,
+      stateStore,
+      tracker: new FakeTracker({
+        stateResponses: [[done], []],
+        stateControl: { transition },
+      }),
+    });
+
+    await harness.orchestrator.start();
+    await settle(harness.orchestrator);
+
+    expect(transition).not.toHaveBeenCalled();
+    expect(stateStore.getSession(seeded.id)?.status).toBe("completed");
+    await harness.orchestrator.stop();
+  });
+
+  it("reconciles Rework abandonment before launching its fresh authoring Attempt", async () => {
+    const config = governedServiceConfig();
+    const rework = governedTask("REWORK-ORDER", { state: "Rework" });
+    const stateStore = SqliteSymphonyStateStore.openInMemory();
+    seedGovernedTrackerSession(stateStore, rework, config);
+    const events: string[] = [];
+    const deliveryExecution = new FakeDeliveryExecution(async (input) => {
+      events.push("delivery");
+      const session = stateStore.getSession(input.sessionId);
+      if (session === null) throw new Error("missing test WorkSession");
+      return { status: "abandoned", session };
+    });
+    const harness = createHarness({
+      config,
+      deliveryExecution,
+      stateStore,
+      tracker: new FakeTracker({ stateResponses: [[], [rework]] }),
+    });
+    harness.agentRunner.onRun = () => events.push("agent");
+
+    await harness.orchestrator.start();
+    await settle(harness.orchestrator);
+
+    expect(events).toEqual(["delivery", "agent"]);
+    expect(deliveryExecution.calls[0]?.tracker.permittedOperations).toEqual([
+      "releaseRemoteBranch",
+      "cleanupWorkspace",
+      "observeMerge",
+    ]);
+    expect(harness.agentRunner.runs[0]?.options.freshAttemptGeneration).toMatch(
+      /^[a-f0-9]{64}$/u,
+    );
+    await harness.orchestrator.stop();
+  });
+
   it("proves an expired runtime quiescent before releasing its lease and redispatching", async () => {
     const active = task("EXPIRED-QUIESCENT");
     const stateStore = SqliteSymphonyStateStore.openInMemory();

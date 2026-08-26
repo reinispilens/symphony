@@ -5,7 +5,8 @@
   "description": "A Node implementation of the Symphony service specification",
   "type": "module",
   "bin": {
-    "symphony": "dist/cli.js"
+    "symphony": "dist/cli.js",
+    "symphony-github-delivery": "bin/symphony-github-delivery.mjs"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -14,8 +15,8 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "pnpm format:check && pnpm typecheck && pnpm test",
     "dev": "tsx src/cli.ts",
-    "format": "prettier --write README.md WORKFLOW.example.md package.json pnpm-workspace.yaml tsconfig.json tsconfig.build.json vitest.config.ts \"src/**/*.ts\" \"test/**/*.ts\" \"test/**/*.mjs\" \"docs/*.md\" \"examples/**/*.json\" \"examples/**/*.md\"",
-    "format:check": "prettier --check README.md WORKFLOW.example.md package.json pnpm-workspace.yaml tsconfig.json tsconfig.build.json vitest.config.ts \"src/**/*.ts\" \"test/**/*.ts\" \"test/**/*.mjs\" \"docs/*.md\" \"examples/**/*.json\" \"examples/**/*.md\"",
+    "format": "prettier --write README.md WORKFLOW.example.md package.json pnpm-workspace.yaml tsconfig.json tsconfig.build.json vitest.config.ts \"bin/*.mjs\" \"src/**/*.ts\" \"test/**/*.ts\" \"test/**/*.mjs\" \"docs/*.md\" \"examples/**/*.json\" \"examples/**/*.md\"",
+    "format:check": "prettier --check README.md WORKFLOW.example.md package.json pnpm-workspace.yaml tsconfig.json tsconfig.build.json vitest.config.ts \"bin/*.mjs\" \"src/**/*.ts\" \"test/**/*.ts\" \"test/**/*.mjs\" \"docs/*.md\" \"examples/**/*.json\" \"examples/**/*.md\"",
     "start": "node dist/cli.js",
     "test": "vitest run",
     "test:watch": "vitest",

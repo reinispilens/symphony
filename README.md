@@ -12,15 +12,19 @@ from the bundled Elixir reference.
 ## The system at a glance
 
 ```text
-product repository                 Symphony operator
-profile + prompt @ Git SHA         deployment binding outside product
-             └──────────────┬──────────────┘
-                            ▼
+personal .github @ accepted publication
+doctrine + tracker policy ───────────────┐
+                                        │
+product repository              Symphony operator
+profile + prompt @ Git SHA      deployment binding outside product
+             └──────────────────┼────────┘
+                                ▼
 GitHub Project ──poll──▶ durable WorkSession + fenced Attempt
-                            │
-                            ├── RepositoryDriver ─────▶ managed Git worktree
-                            ├── sandboxed preparation ▶ frozen dependencies
-                            └── systemd scope ────────▶ Codex app-server + descendants
+                                │
+                                ├── RepositoryDriver ─────▶ managed Git worktree
+                                ├── sandboxed preparation ▶ frozen dependencies
+                                ├── systemd scope ────────▶ Codex app-server + descendants
+                                └── delivery saga ────────▶ PR + exact WCP proof + cleanup
 
 SQLite under the operator-selected state root records the complete WorkSession aggregate and
 effects. One daemon owns one accepted binding, one repository, and one Project.
@@ -34,9 +38,9 @@ worktree lifecycle.
 
 `workspace.provider: harness` remains available only to drain existing consumers. New integrations
 use the implemented [`repository-driver boundary`](docs/repository-driver-boundary.md) and must not
-copy lifecycle machinery into target repositories. Protected WCP proof, durable delivery, doctrine
-pinning, the Dyslexify pilot, and manual WorkSession commands are the next estate phases and are not
-claimed here as complete.
+copy lifecycle machinery into target repositories. Accepted-governance resolution, lane-aware
+authoring, durable delivery, and exact WCP proof correlation are implemented here. The real
+Dyslexify journey and manual WorkSession commands remain separate acceptance gates.
 
 ## Requirements
 
@@ -92,27 +96,35 @@ The product repository commits a thin `.symphony/repository-profile.json` and it
       "revision": "0000000000000000000000000000000000000000",
       "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     },
-    "requiredChecks": ["proof / Protected final"]
+    "requiredChecks": ["proof / Protected proof v2 / final"]
   }
 }
 ```
 
-Outside the product repository, the operator creates a deployment binding. It pins the profile by
-repository, path, exact commit, and digest, then supplies the tracker, source checkout, disjoint
+Outside the product repository, the operator creates a version-3 deployment binding. It pins the
+profile and one accepted-governance manifest by repository, path, exact commit, and digest. The
+manifest in turn identifies the exact accepted doctrine and tracker-policy blobs. The binding also
+supplies only repository-specific tracker coordinates plus source checkout, disjoint
 state/workspace roots, branch namespace, capacity, timeouts, exact Codex executable, and exact
-Git/`systemd-run`/`systemctl` executables. For pnpm products it also pins exact Node, pnpm, and
-Bubblewrap paths plus one versioned offline dependency policy and a read-only seed-store root. See
+Git/`systemd-run`/`systemctl` executables. For pnpm products it pins exact Node, pnpm, and Bubblewrap
+paths plus one versioned offline dependency policy and a read-only seed-store root. See
 [`examples/managed/deployment-binding.json`](examples/managed/deployment-binding.json) and
 [`examples/managed/repository-profile.json`](examples/managed/repository-profile.json).
 When the accepted profile selects `preparationClass: "none"`, the binding sets `preparation` to
 `null`; Symphony neither requires nor validates an unused pnpm toolchain or seed. A missing or
 extra pnpm authority is a profile/binding mismatch and is refused.
 
-A version-2 binding also names one operator-owned delivery-provider executable and only the secret
-environment-variable names it receives. The provider performs credentialed hosting operations from
-typed, credential-free requests; candidate execution never receives those credentials. Symphony
+A version-3 binding names one operator-owned delivery-provider executable, only the secret
+environment-variable names it receives, and one protected-proof trust anchor. That anchor maps one
+product-required check to an exact `pull_request_target` caller path and an immutable Workspace
+Control Plane repository/workflow/SHA. This repository ships the GitHub implementation as
+`bin/symphony-github-delivery.mjs`. It performs credentialed hosting operations from typed,
+credential-free requests; candidate execution never receives those credentials. Symphony
 materializes edited source through its own bounded manifest and temporary index, then correlates
-push, PR, exact-head protected checks, grant-constrained merge, and cleanup durably across restart.
+push, PR, exact-head protected checks, host-authenticated workflow identity, and WCP artifacts,
+grant-constrained merge, Rework abandonment, and cleanup durably across restart. Version-1 and
+version-2 bindings remain readable for migration and historical state, but they cannot start a new
+managed Attempt because they do not select accepted governance.
 
 Run only the binding for a managed repository:
 
@@ -120,8 +132,11 @@ Run only the binding for a managed repository:
 node /path/to/symphony/dist/cli.js --binding /etc/symphony/your-repository.json
 ```
 
-Status remains the authorization gate. Required and excluded labels only select which executor may
-claim an active item; changing either selector during a run causes Symphony to release that worker.
+The WorkSession's pinned tracker policy gives each lane its meaning. Live status and driver labels
+remain the current authorization facts: only authoring lanes launch Codex, delivery-only lanes use
+no agent slot, and a change away from the accepted Symphony driver releases an authoring worker.
+Repinning the daemon affects new WorkSessions; an existing WorkSession continues under the complete
+policy value it already recorded.
 
 The managed driver verifies that the accepted source checkout's `origin` host and owner/repository
 match the tracker-resolved hostname plus the product profile identity, resolves the configured full
@@ -217,16 +232,16 @@ attempt and retry facts are projected from durable WorkSession state.
 
 ## Current deployment boundary
 
-The durable WorkSession store now uses its version-2 aggregate contract: accepted
-product/context/binding inputs, plans and decisions, human attachments outside Attempt leases,
-materialization/proof/delivery records, and the existing fenced attempts/retries/outbox all share
-one transactional root. The managed Git-worktree driver, accepted profile/operator-binding split,
-separate state root, exact Codex sandbox/systemd scope, quiescence-before-lease-release, and
-offline-only pnpm preparation path are implemented and covered by deterministic and
-real-Git/process fixtures. Production pilot readiness still requires WCP protected proof v2 and its
-capacity-one canary, durable delivery
-correlation, accepted doctrine publication, and a recorded Dyslexify end-to-end journey. No
-product repository should fill those gaps with another local harness.
+The durable WorkSession store uses one version-2 aggregate contract: accepted
+product/context/binding inputs, accepted doctrine/manifest/policy and WCP-trust snapshots, plans and
+decisions, human attachments outside Attempt leases, materialization/proof/delivery records, and
+fenced attempts/retries/outbox all share one transactional root. The managed Git-worktree driver,
+accepted-governance composition, exact Codex sandbox/systemd scope, offline-only pnpm preparation,
+lane-aware reconciliation, built-in GitHub delivery provider, and host-authenticated WCP workflow
+and artifact correlation are implemented and covered by deterministic and real-Git/process
+fixtures. Production readiness still
+requires the final accepted-governance repin and a recorded Dyslexify end-to-end journey. No product
+repository should fill those gates with another local harness.
 
 ## License
 

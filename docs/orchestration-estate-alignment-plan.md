@@ -1141,30 +1141,34 @@ Dyslexify merge is the product-owned Phase 8 decision.
    port so credentials remain operator-owned and every operation receives the recorded grant,
    current tracker authority, immutable source identity, and fencing generation. Candidate source,
    agent output, and mere runtime possession cannot grant or widen delivery.
-2. Stop authoring and release the runtime lease only after the attempt-owned app server and command
+2. Pin an operator-owned proof transport authority on the WorkSession: one product-required check,
+   exact `pull_request_target` caller path, and immutable WCP reusable-workflow repository/path/SHA.
+   Admit artifacts only after GitHub's run metadata and the protected plan agree with that anchor;
+   a same-named check or self-consistent candidate artifact pair is insufficient.
+3. Stop authoring and release the runtime lease only after the attempt-owned app server and command
    descendants are absent. Acquire the exclusive materialization fence; verify the active managed
    workspace lease, pinned parent, branch namespace, runtime-temp cleanup, and independent
    Git/filesystem facts.
-3. Add a trusted, restart-safe materialization saga that records intent and a bounded input
+4. Add a trusted, restart-safe materialization saga that records intent and a bounded input
    manifest, applies the fixed source-inclusion policy through a Symphony-owned temporary index with
    no candidate hooks/filters/helpers, detects concurrent mutation, records tree and commit
    identity, and atomically advances only the recorded managed branch from its expected old SHA.
    Refuse ignored/runtime artifacts, oversized input, unsupported submodule/nested-repository/filter
    state, or any ambiguity rather than capturing them or falling back.
-4. Add delivery state beneath WorkSession, binding the materialization record, branch, PR,
+5. Add delivery state beneath WorkSession, binding the materialization record, branch, PR,
    immutable local/remote head SHA, WCP required-check/run/result identities, admitted proof
    plan/result, merge observation, cleanup, and release intent where authorized.
-5. Put every remote mutation through the state-store saga/outbox with an idempotency key and
+6. Put every remote mutation through the state-store saga/outbox with an idempotency key and
    fencing generation.
-6. Push only the exact materialized head with an expected remote-ref state, then create or recover
+7. Push only the exact materialized head with an expected remote-ref state, then create or recover
    the PR against that immutable head. The protected GitHub/WCP path from Phase 4 supplies the
    required check; Symphony neither invokes a second proof transport nor accepts a check from a
    different SHA.
-7. Add restart-safe WCP/CI waiting and outcome classification without sleeping agent turns.
-8. Re-read Git hosting after any ambiguous command outcome before retrying; never infer success or
+8. Add restart-safe WCP/CI waiting and outcome classification without sleeping agent turns.
+9. Re-read Git hosting after any ambiguous command outcome before retrying; never infer success or
    failure from process exit alone.
-9. Keep delivery credentials in a separate trusted provider process. Candidate preparation and
-   agent execution never receive them.
+10. Keep delivery credentials in a separate trusted provider process. Candidate preparation and
+    agent execution never receive them.
 
 **Exit:** edited worktree bytes become one recorded immutable commit without candidate Git-ref or
 credential authority, and restart at any delivery boundary resumes against that exact PR head

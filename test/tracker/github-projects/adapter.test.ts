@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Logger } from "../../../src/observability/logger.js";
 import { GitHubProjectsAdapter } from "../../../src/tracker/github-projects/adapter.js";
+import { issue } from "../../support/factories.js";
 import {
   config,
   FakeGraphqlClient,
@@ -12,12 +13,47 @@ import {
 
 function adapter(client: FakeGraphqlClient, logger?: Logger) {
   return new GitHubProjectsAdapter({
-    activeStates: ["Todo", "In Progress"],
     client,
     config,
     ...(logger === undefined ? {} : { logger }),
   });
 }
+
+describe("GitHubProjectsAdapter.agentToolRuntime", () => {
+  it("uses managed WorkSession targets instead of compatibility provider targets", () => {
+    const managed = new GitHubProjectsAdapter({
+      client: new FakeGraphqlClient([]),
+      config: {
+        ...config,
+        agentStatusTargets: ["Merging", "Done"],
+      },
+    }).agentToolRuntime(issue(), {
+      freshAttempt: false,
+      statusTargets: ["In Progress", "Human Review"],
+    });
+
+    expect(
+      managed.specs.find((spec) => spec.name === "github_project_status_update")
+        ?.inputSchema["properties"],
+    ).toMatchObject({
+      status: { enum: ["In Progress", "Human Review"] },
+    });
+
+    const none = new GitHubProjectsAdapter({
+      client: new FakeGraphqlClient([]),
+      config: {
+        ...config,
+        agentStatusTargets: ["Merging", "Done"],
+      },
+    }).agentToolRuntime(issue(), {
+      freshAttempt: false,
+      statusTargets: [],
+    });
+    expect(none.specs.map((spec) => spec.name)).not.toContain(
+      "github_project_status_update",
+    );
+  });
+});
 
 describe("GitHubProjectsAdapter.fetchIssuesByStates", () => {
   it("does not call GitHub for an empty state list", async () => {
@@ -190,7 +226,7 @@ describe("GitHubProjectsAdapter.fetchIssuesByIds", () => {
     expect(issues[0]).toMatchObject({
       id: "PVTI_1",
       state: "Human Review",
-      dispatchable: false,
+      dispatchable: true,
     });
     expect(client.calls[0]?.variables["ids"]).toEqual(["PVTI_1", "MISSING"]);
   });

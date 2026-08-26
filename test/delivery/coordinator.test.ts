@@ -13,6 +13,10 @@ import type {
   RequiredCheckObservation,
 } from "../../src/state/model.js";
 import { SqliteSymphonyStateStore } from "../../src/state/sqlite-store.js";
+import {
+  acceptedGovernanceFixture,
+  protectedProofAuthorityFixture,
+} from "../support/factories.js";
 
 const START = "2026-08-26T10:00:00.000Z";
 const BASE_SHA = "a".repeat(40);
@@ -21,6 +25,7 @@ const MERGE_SHA = "e".repeat(40);
 const CHECK_NAME = "proof / Protected final";
 
 function configuration(authority: "owner-gated" | "full-in-scope") {
+  const governance = acceptedGovernanceFixture();
   return {
     productProfile: {
       repositoryIdentity: "acme/widgets",
@@ -35,16 +40,14 @@ function configuration(authority: "owner-gated" | "full-in-scope") {
       entries: [],
     },
     deploymentBinding: { id: "widgets-test", digest: "sha256:binding" },
+    governanceManifest: governance.governanceManifest,
+    trackerPolicy: governance.trackerPolicy,
     deliveryGrant: {
       authority,
-      governingPolicy: {
-        repositoryIdentity: "acme/.github",
-        path: "agent-system/delivery-policy.json",
-        revision: "2".repeat(40),
-        digest: "sha256:policy",
-      },
+      governingPolicy: governance.trackerPolicy.source,
       requiredChecks: [CHECK_NAME],
     },
+    proofAuthority: protectedProofAuthorityFixture(CHECK_NAME),
   } as const;
 }
 
@@ -54,8 +57,36 @@ function trackerAuthority(permitsMerge = false): TrackerDeliveryAuthority {
     issueId: "widgets-1",
     state: "Human Review",
     stateVersion: "state-7",
+    permittedOperations: [
+      "materialize",
+      "push",
+      "openPullRequest",
+      "observeChecks",
+      "observeMerge",
+      "releaseRemoteBranch",
+      "cleanupWorkspace",
+      ...(permitsMerge ? (["mergePullRequest"] as const) : []),
+    ],
     permitsDelivery: true,
     permitsMerge,
+    permitsCleanup: true,
+    observedAt: START,
+  };
+}
+
+function reworkAuthority(): TrackerDeliveryAuthority {
+  return {
+    origin: "tracker",
+    issueId: "widgets-1",
+    state: "Rework",
+    stateVersion: "state-rework-1",
+    permittedOperations: [
+      "observeMerge",
+      "releaseRemoteBranch",
+      "cleanupWorkspace",
+    ],
+    permitsDelivery: false,
+    permitsMerge: false,
     permitsCleanup: true,
     observedAt: START,
   };
@@ -147,6 +178,19 @@ class FakeDeliveryProvider implements DeliveryProvider {
           mergeSha: MERGE_SHA,
         };
         break;
+      case "close_pull_request":
+        if (
+          this.pullRequest === null ||
+          this.pullRequest.id !== request.pullRequestId
+        ) {
+          throw new Error("pull request does not exist");
+        }
+        this.pullRequest = {
+          ...this.pullRequest,
+          state: "closed",
+          mergeSha: null,
+        };
+        break;
       case "delete_remote_branch":
         if (this.remoteHeadSha !== request.expectedRemoteHeadSha) {
           throw new Error("remote branch moved");
@@ -173,6 +217,7 @@ class FakeDeliveryProvider implements DeliveryProvider {
 }
 
 function fixture(authority: "owner-gated" | "full-in-scope") {
+  const governance = acceptedGovernanceFixture();
   const store = SqliteSymphonyStateStore.openInMemory();
   const session = store.getOrCreateTrackerSession({
     trackerKind: "test",
@@ -182,7 +227,7 @@ function fixture(authority: "owner-gated" | "full-in-scope") {
     issueUrl: "https://github.com/acme/widgets/issues/1",
     intent: "Deliver one immutable change",
     controllerId: "tracker:test:acme/widgets",
-    doctrine: null,
+    doctrine: governance.doctrine,
     configuration: configuration(authority),
     now: START,
   });
@@ -310,6 +355,140 @@ function fixture(authority: "owner-gated" | "full-in-scope") {
 }
 
 describe("DeliveryCoordinator", () => {
+  it("closes the exact unmerged pull request and remote branch before Rework", async () => {
+    const setup = fixture("owner-gated");
+    try {
+      await expect(
+        setup.coordinator().start({
+          sessionId: setup.sessionId,
+          materializationId: setup.materializationId,
+          controllerGeneration: setup.started.controllerGeneration,
+          tracker: trackerAuthority(),
+        }),
+      ).resolves.toMatchObject({ status: "awaiting_checks" });
+
+      const abandoned = await setup.coordinator().abandon({
+        sessionId: setup.sessionId,
+        controllerGeneration: setup.started.controllerGeneration,
+        tracker: reworkAuthority(),
+      });
+      expect(abandoned.session.delivery).toMatchObject({
+        phase: "refused",
+        cleanupStatus: "pending",
+        remoteHeadSha: null,
+      });
+      expect(setup.provider.count("close_pull_request")).toBe(1);
+      expect(setup.provider.count("delete_remote_branch")).toBe(1);
+      expect(setup.provider.pullRequest?.state).toBe("closed");
+
+      const completed = setup.coordinator().completeAbandonmentCleanup({
+        sessionId: setup.sessionId,
+        controllerGeneration: setup.started.controllerGeneration,
+        tracker: reworkAuthority(),
+      });
+      expect(completed.delivery).toMatchObject({
+        phase: "refused",
+        cleanupStatus: "completed",
+      });
+    } finally {
+      setup.store.close();
+    }
+  });
+
+  it("finishes a pending close intent when restart observes the exact PR already closed", async () => {
+    const setup = fixture("owner-gated");
+    try {
+      await setup.coordinator().start({
+        sessionId: setup.sessionId,
+        materializationId: setup.materializationId,
+        controllerGeneration: setup.started.controllerGeneration,
+        tracker: trackerAuthority(),
+      });
+      const close = setup.store.enqueueEffect({
+        sessionId: setup.sessionId,
+        controllerGeneration: setup.started.controllerGeneration,
+        kind: "delivery.close_pull_request",
+        idempotencyKey: `delivery:abandon:${HEAD_SHA}:close-pull-request`,
+        payload: {
+          repository: "acme/widgets",
+          branch: "symphony/widgets",
+          head: HEAD_SHA,
+        },
+        now: "2026-08-26T10:00:30.000Z",
+      });
+      setup.provider.pullRequest = {
+        ...setup.provider.pullRequest!,
+        state: "closed",
+        mergeSha: null,
+      };
+
+      await setup.coordinator().abandon({
+        sessionId: setup.sessionId,
+        controllerGeneration: setup.started.controllerGeneration,
+        tracker: reworkAuthority(),
+      });
+
+      expect(setup.provider.count("close_pull_request")).toBe(0);
+      expect(
+        setup.store
+          .listPendingEffects()
+          .some((effect) => effect.id === close.id),
+      ).toBe(false);
+    } finally {
+      setup.store.close();
+    }
+  });
+
+  it("never repeats an applied Rework branch release if the branch reappears", async () => {
+    const setup = fixture("owner-gated");
+    try {
+      await setup.coordinator().start({
+        sessionId: setup.sessionId,
+        materializationId: setup.materializationId,
+        controllerGeneration: setup.started.controllerGeneration,
+        tracker: trackerAuthority(),
+      });
+      setup.provider.pullRequest = {
+        ...setup.provider.pullRequest!,
+        state: "closed",
+        mergeSha: null,
+      };
+      const effect = setup.store.enqueueEffect({
+        sessionId: setup.sessionId,
+        controllerGeneration: setup.started.controllerGeneration,
+        kind: "delivery.delete_remote_branch",
+        idempotencyKey: `delivery:abandon:${HEAD_SHA}:delete-remote-branch`,
+        payload: {
+          repository: "acme/widgets",
+          branch: "symphony/widgets",
+          head: HEAD_SHA,
+        },
+        now: "2026-08-26T10:00:30.000Z",
+      });
+      setup.store.finishEffect({
+        effectId: effect.id,
+        controllerGeneration: setup.started.controllerGeneration,
+        status: "applied",
+        result: { remote_branch: "absent" },
+        now: "2026-08-26T10:00:31.000Z",
+      });
+
+      await expect(
+        setup.coordinator().abandon({
+          sessionId: setup.sessionId,
+          controllerGeneration: setup.started.controllerGeneration,
+          tracker: reworkAuthority(),
+        }),
+      ).rejects.toMatchObject({
+        code: "delivery_refused",
+        message: expect.stringContaining("no longer reflected"),
+      });
+      expect(setup.provider.count("delete_remote_branch")).toBe(0);
+    } finally {
+      setup.store.close();
+    }
+  });
+
   it("waits for the owner after exact-head proof and adopts an external merge", async () => {
     const setup = fixture("owner-gated");
     try {
@@ -441,6 +620,7 @@ describe("DeliveryCoordinator", () => {
       expect(setup.provider.count("open_pull_request")).toBe(1);
 
       setup.provider.requiredChecks = [passedCheck()];
+      setup.provider.proof = [passedProof()];
       await expect(
         setup.coordinator().resume({
           sessionId: setup.sessionId,
@@ -471,6 +651,49 @@ describe("DeliveryCoordinator", () => {
         message: expect.stringContaining("not ddddd"),
       });
       expect(setup.store.getSession(setup.sessionId)?.proof).toEqual([]);
+    } finally {
+      setup.store.close();
+    }
+  });
+
+  it("refuses a green check without an exact passed protected-proof correlation", async () => {
+    const setup = fixture("owner-gated");
+    try {
+      setup.provider.requiredChecks = [passedCheck()];
+      setup.provider.proof = [];
+      await expect(
+        setup.coordinator().start({
+          sessionId: setup.sessionId,
+          materializationId: setup.materializationId,
+          controllerGeneration: setup.started.controllerGeneration,
+          tracker: trackerAuthority(),
+        }),
+      ).rejects.toMatchObject({
+        code: "delivery_refused",
+        message: expect.stringContaining("protected-proof correlation"),
+      });
+    } finally {
+      setup.store.close();
+    }
+  });
+
+  it("refuses proof correlation without concrete check and workflow run identities", async () => {
+    const setup = fixture("owner-gated");
+    try {
+      setup.provider.requiredChecks = [
+        { ...passedCheck(), checkRunId: null, workflowRunId: null },
+      ];
+      setup.provider.proof = [
+        { ...passedProof(), checkRunId: null, workflowRunId: null },
+      ];
+      await expect(
+        setup.coordinator().start({
+          sessionId: setup.sessionId,
+          materializationId: setup.materializationId,
+          controllerGeneration: setup.started.controllerGeneration,
+          tracker: trackerAuthority(),
+        }),
+      ).rejects.toMatchObject({ code: "delivery_refused" });
     } finally {
       setup.store.close();
     }

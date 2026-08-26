@@ -3,6 +3,25 @@ import { Liquid } from "liquidjs";
 import type { Issue } from "../domain/issue.js";
 import { issueForTemplate } from "../domain/issue.js";
 import { SymphonyError, errorMessage } from "../errors.js";
+import type { RepositoryContentSnapshot } from "../state/model.js";
+
+export interface PromptAuthorityContext {
+  readonly workSessionId: string;
+  readonly doctrine: RepositoryContentSnapshot | null;
+  readonly governanceManifest: RepositoryContentSnapshot | null;
+  readonly trackerPolicy: RepositoryContentSnapshot | null;
+}
+
+function contentReference(reference: RepositoryContentSnapshot | null) {
+  return reference === null
+    ? null
+    : {
+        repository_identity: reference.repositoryIdentity,
+        path: reference.path,
+        revision: reference.revision,
+        digest: reference.digest,
+      };
+}
 
 const FALLBACK_PROMPT =
   "You are working on an issue from the configured tracker.";
@@ -17,6 +36,7 @@ export async function renderPrompt(
   promptTemplate: string,
   issue: Issue,
   attempt: number | null,
+  authority: PromptAuthorityContext | null = null,
 ): Promise<string> {
   const source =
     promptTemplate.trim() === "" ? FALLBACK_PROMPT : promptTemplate;
@@ -39,6 +59,15 @@ export async function renderPrompt(
     return await engine.render(template, {
       issue: issueForTemplate(issue),
       attempt,
+      work_session: authority === null ? null : { id: authority.workSessionId },
+      governance:
+        authority === null
+          ? null
+          : {
+              doctrine: contentReference(authority.doctrine),
+              manifest: contentReference(authority.governanceManifest),
+              tracker_policy: contentReference(authority.trackerPolicy),
+            },
     });
   } catch (error) {
     throw new SymphonyError(

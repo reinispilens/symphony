@@ -15,6 +15,7 @@ import {
   managedCodexTurnSandboxPolicy,
 } from "../security/managed-codex-policy.js";
 import type { AcceptedConfigurationSnapshot } from "../state/model.js";
+import type { DoctrineSnapshot } from "../state/model.js";
 import type { TrackerConfigProfiles } from "../tracker/config-profile.js";
 import type { WorkflowDefinition } from "./definition.js";
 
@@ -81,6 +82,8 @@ export interface DeploymentAuthorityConfig {
   readonly sourceRoot: string;
   readonly stateRoot: string;
   readonly acceptedConfiguration: AcceptedConfigurationSnapshot;
+  /** Null only for deployment-binding v1/v2 compatibility. */
+  readonly doctrine: DoctrineSnapshot | null;
   readonly codexExecutable: string;
   readonly gitExecutable: string;
   readonly deliveryProvider: {
@@ -88,6 +91,7 @@ export interface DeploymentAuthorityConfig {
     readonly executable: string;
     readonly timeoutMs: number;
     readonly secretEnvironmentNames: readonly string[];
+    readonly proofAuthority: AcceptedConfigurationSnapshot["proofAuthority"];
   } | null;
   readonly preparation: ManagedPnpmPreparationAuthorityConfig | null;
   readonly processContainment: ManagedProcessContainmentConfig;

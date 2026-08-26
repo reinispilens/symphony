@@ -5,7 +5,11 @@ import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 
 import { SqliteSymphonyStateStore } from "../../src/state/sqlite-store.js";
-import { withTempDirectory } from "../support/factories.js";
+import {
+  acceptedGovernanceFixture,
+  protectedProofAuthorityFixture,
+  withTempDirectory,
+} from "../support/factories.js";
 
 const START = "2026-08-25T10:00:00.000Z";
 
@@ -25,6 +29,7 @@ function trackerInput() {
 }
 
 function acceptedConfiguration() {
+  const governance = acceptedGovernanceFixture();
   return {
     productProfile: {
       repositoryIdentity: "reinispilens/symphony",
@@ -45,40 +50,36 @@ function acceptedConfiguration() {
       id: "personal-symphony",
       digest: "sha256:binding",
     },
+    governanceManifest: governance.governanceManifest,
+    trackerPolicy: governance.trackerPolicy,
     deliveryGrant: null,
+    proofAuthority: null,
   } as const;
 }
 
 function acceptedDeliveryConfiguration(
   authority: "owner-gated" | "full-in-scope" = "owner-gated",
 ) {
+  const governance = acceptedGovernanceFixture();
   return {
     ...acceptedConfiguration(),
     deliveryGrant: {
       authority,
-      governingPolicy: {
-        repositoryIdentity: "reinispilens/.github",
-        path: "agent-system/delivery-policy.json",
-        revision: "b".repeat(40),
-        digest: "sha256:delivery-policy",
-      },
+      governingPolicy: governance.trackerPolicy.source,
       requiredChecks: ["proof / Protected final"],
     },
+    proofAuthority: protectedProofAuthorityFixture(),
   } as const;
 }
 
 function interactiveInput(initiatingActor = "reinis") {
+  const governance = acceptedGovernanceFixture();
   return {
     repositoryIdentity: "reinispilens/symphony",
     initiatingActor,
     intent: "Drive one boardless WorkSession",
     controllerId: `human:${initiatingActor}`,
-    doctrine: {
-      repositoryIdentity: "reinispilens/.github",
-      path: "agent-system/golden-principles.md",
-      revision: "b".repeat(40),
-      digest: "sha256:golden-principles",
-    },
+    doctrine: governance.doctrine,
     configuration: acceptedConfiguration(),
     now: START,
   } as const;
@@ -138,6 +139,30 @@ function downgradeToV1Attached(
 }
 
 describe("SqliteSymphonyStateStore", () => {
+  it("keeps legacy managed configuration readable but refuses a new Attempt without accepted governance", () => {
+    const store = SqliteSymphonyStateStore.openInMemory();
+    try {
+      const session = store.getOrCreateTrackerSession({
+        ...trackerInput(),
+        configuration: {
+          ...acceptedConfiguration(),
+          governanceManifest: null,
+          trackerPolicy: null,
+        },
+      });
+      expect(session.configuration?.trackerPolicy).toBeNull();
+      expect(() => startAttempt(store, session.id)).toThrowError(
+        expect.objectContaining({
+          code: "input_conflict",
+          message: expect.stringContaining("accepted governance"),
+        }),
+      );
+      expect(store.getSession(session.id)?.attempts).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("creates one tracker WorkSession and pins doctrine without replacing it", () => {
     const store = SqliteSymphonyStateStore.openInMemory();
     try {
@@ -150,12 +175,7 @@ describe("SqliteSymphonyStateStore", () => {
 
       const pinned = store.getOrCreateTrackerSession({
         ...trackerInput(),
-        doctrine: {
-          repositoryIdentity: "reinispilens/.github",
-          path: "agent-system/golden-principles.md",
-          revision: "abc123",
-          digest: "sha256:first",
-        },
+        doctrine: acceptedGovernanceFixture().doctrine,
         configuration: acceptedConfiguration(),
         now: "2026-08-25T10:00:01.000Z",
       });
@@ -989,6 +1009,7 @@ describe("SqliteSymphonyStateStore", () => {
     try {
       const session = store.getOrCreateTrackerSession({
         ...trackerInput(),
+        doctrine: acceptedGovernanceFixture().doctrine,
         configuration: acceptedDeliveryConfiguration(),
       });
       const started = startAttempt(store, session.id);

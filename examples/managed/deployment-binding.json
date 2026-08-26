@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "id": "your-repository-production",
   "productProfile": {
     "repositoryIdentity": "your-owner/your-repository",
@@ -12,11 +12,31 @@
   "workspaceRoot": "/srv/symphony-workspaces/your-repository",
   "branchPrefix": "symphony/",
   "gitExecutable": "/usr/bin/git",
+  "governance": {
+    "repositoryIdentity": "your-owner/.github",
+    "sourceRoot": "/srv/repositories/.github",
+    "manifest": {
+      "path": "agent-system/accepted-governance.json",
+      "revision": "0000000000000000000000000000000000000000",
+      "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
   "deliveryProvider": {
     "protocolVersion": 1,
-    "executable": "/opt/symphony/providers/github-delivery",
+    "executable": "/opt/symphony/bin/symphony-github-delivery.mjs",
     "timeoutMs": 30000,
-    "secretEnvironmentNames": ["SYMPHONY_DELIVERY_TOKEN"]
+    "secretEnvironmentNames": ["GH_TOKEN"],
+    "proofAuthority": {
+      "kind": "github-actions-reusable-workflow-v1",
+      "requiredCheck": "proof / Protected proof v2 / final",
+      "eventName": "pull_request_target",
+      "callerWorkflowPath": ".github/workflows/protected-proof-v2.yml",
+      "controlWorkflow": {
+        "repositoryIdentity": "your-owner/workspace-control-plane",
+        "path": ".github/workflows/protected-proof-v2.yml",
+        "revision": "0000000000000000000000000000000000000000"
+      }
+    }
   },
   "tracker": {
     "kind": "github-projects",
@@ -26,15 +46,8 @@
       "repo": "your-repository",
       "project": 1,
       "status_field": "Status",
-      "priority_field": "Priority",
-      "agent_status_targets": ["In Progress", "Human Review", "Done"]
-    },
-    "requiredLabels": ["driver:symphony"],
-    "excludedLabels": ["driver:direct"],
-    "activeStates": ["Todo", "In Progress", "Merging", "Rework"],
-    "terminalStates": ["Done", "Cancelled", "Duplicate"],
-    "freshAttemptStates": ["Rework"],
-    "freshAttemptFailureState": "Human Review"
+      "priority_field": "Priority"
+    }
   },
   "polling": {
     "intervalMs": 30000
