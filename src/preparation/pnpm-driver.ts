@@ -363,7 +363,10 @@ async function sandboxInvocation(
     return target;
   };
   const inSandboxNode = bindStandaloneProgram(node, "/tool/node");
-  const inSandboxPnpm = bindStandaloneProgram(pnpm, "/tool/pnpm.mjs");
+  const inSandboxPnpm = bindStandaloneProgram(
+    pnpm,
+    `/tool/pnpm${path.extname(pnpm.realPath)}`,
+  );
   const sandboxPath = [
     ...uniqueToolRoots.map((root) => path.join(root, "bin")),
     "/usr/bin",

@@ -915,7 +915,7 @@ fs.writeFileSync("network-observation.json", JSON.stringify(result));
       await writePackage(workspace.path);
       const sandboxLog = path.join(directory, "sandbox-args.json");
       const unsafeMarker = path.join(workspace.path, "unsandboxed-fallback");
-      const entryPoint = path.join(directory, "must-not-run.mjs");
+      const entryPoint = path.join(directory, "must-not-run.cjs");
       const sandbox = path.join(directory, "refusing-sandbox.mjs");
       await Promise.all([
         writeFile(
@@ -952,6 +952,7 @@ fs.writeFileSync("network-observation.json", JSON.stringify(result));
         const args = JSON.parse(await readFile(sandboxLog, "utf8")) as string[];
         expect(args).toContain("--unshare-all");
         expect(args).not.toContain("--share-net");
+        expect(args).toContain("/tool/pnpm.cjs");
         expect(args).toContain("--offline");
         expect(args).toContain("--trust-lockfile");
         expect(args).toContain("/dependency-seed");
