@@ -148,7 +148,7 @@ may need that durable workspace when a human sends the card back.
 
 `<stateRoot>/state.sqlite` owns managed WorkSessions, accepted
 configuration/doctrine/policy/proof-authority snapshots, plans/decisions, session-level human attachments, attempts, runtime/workspace leases, preparation
-outcomes, retries, materialization/proof/delivery state, and external-effect intents. Human
+outcomes, retries, materialization/check/delivery state, and external-effect intents. Human
 attachments are never Attempt workspace leases and are therefore outside every cleanup path. At
 startup, versioned document migrations run transactionally. Expired timestamps nominate leases for
 quiescence; they become interrupted only after the process boundary proves their descendant scope

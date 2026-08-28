@@ -13,7 +13,6 @@ import type {
   FinishAttemptInput,
   FinishPreparationInput,
   RecordWorkspaceInput,
-  RecordProofInput,
   ReplacePlanInput,
   RenewRuntimeLeaseInput,
   RuntimeCorrelationInput,
@@ -96,7 +95,6 @@ export interface SymphonyStateStore {
   ): WorkSessionSnapshot;
   beginDelivery(input: BeginDeliveryInput): WorkSessionSnapshot;
   transitionDelivery(input: TransitionDeliveryInput): WorkSessionSnapshot;
-  recordProof(input: RecordProofInput): WorkSessionSnapshot;
   scheduleRetry(input: ScheduleRetryInput): WorkSessionSnapshot;
   clearRetry(
     sessionId: string,

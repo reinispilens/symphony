@@ -4,9 +4,8 @@
 > This runbook documents the managed-workspace implementation plus the existing
 > hook-based compatibility route. New repositories use the Symphony-owned
 > [`repository-driver boundary`](repository-driver-boundary.md); they do not implement Symphony
-> lifecycle features locally. Accepted-governance composition, lane-aware orchestration, WCP proof
-> correlation, and durable delivery exist in Symphony. The final accepted-publication repin and the
-> Dyslexify deployment journey remain separate estate gates.
+> lifecycle features locally. Accepted-governance composition, lane-aware orchestration,
+> exact-head required-check observation, and durable delivery exist in Symphony.
 
 ## Deployment map
 
@@ -15,7 +14,7 @@ personal .github @ publication SHA
 accepted manifest ─▶ doctrine + tracker policy ─────┐
                                                      │
 product A @ accepted Git SHA       operator binding v3 │
-profile + prompt/context           tracker + roots + runtime + WCP trust anchor
+profile + prompt/context           tracker + roots + runtime + delivery provider
                 └───────────────┬───────────────┘
                                   ▼
                        accepted configuration
@@ -25,7 +24,7 @@ profile + prompt/context           tracker + roots + runtime + WCP trust anchor
                                   ├── managed Git worktrees
                                   ├── sandboxed preparation
                                   ├── systemd user scopes for agent descendants
-                                  └── durable PR/proof/delivery reconciliation
+                                  └── durable PR/check/delivery reconciliation
                                   ▼
                            state-root/state.sqlite
                         WorkSessions · leases · sagas · outbox
@@ -37,8 +36,8 @@ Symphony is a daemon, not a command that should be launched once per issue. A su
 instance alive for each repository. For managed Git, an operator-owned binding is the deployment
 contract. Version 3 pins one accepted `.github` publication plus one product profile/context
 revision and supplies the Project, host roots, capacity, runtime, delivery credentials,
-process-containment authority, one exact WCP reusable-workflow trust anchor, and—when pnpm is
-selected—the exact preparation toolchain plus offline dependency policy. Running several
+process-containment authority, and—when pnpm is selected—the exact preparation toolchain plus
+offline dependency policy. Running several
 repositories in one Symphony process is deliberately unsupported. Repository-owned `WORKFLOW.md`
 remains only for existing directory/harness compatibility deployments.
 
@@ -58,7 +57,7 @@ pnpm build
 Authenticate `gh` as the same operating-system user that will run the service. For the built-in
 GitHub delivery provider, place `GH_TOKEN` in a protected environment file readable only by the
 service identity. The combined authority needs read access to the exact repository, Project,
-workflow run, and artifact records; status/workpad, push, pull-request, or merge rights are needed
+and check-run records; status/workpad, push, pull-request, or merge rights are needed
 only for operations allowed by the pinned product grant and tracker lane.
 
 Treat the workflow and every compatibility hook as privileged service code. Hooks intentionally run
@@ -75,11 +74,8 @@ Create the separate version-3 binding from
 [`../examples/managed/deployment-binding.json`](../examples/managed/deployment-binding.json). Replace
 its placeholders with the exact profile and manifest revisions plus the SHA-256 digests of their Git
 blob bytes. The product's delivery grant must name the accepted tracker-policy reference exactly;
-the product cannot select a different policy or a mutable branch. Set
-`deliveryProvider.proofAuthority.requiredCheck` to one check in that grant, then pin the exact
-`pull_request_target` caller path and the Workspace Control Plane reusable workflow by repository,
-path, and full commit. This is operator transport authority: do not copy WCP implementation into
-the product repository.
+the product cannot select a different policy or a mutable branch. Its `requiredChecks` list names
+the ordinary GitHub checks that must pass on the exact delivered commit.
 
 Confirm that both checkouts' observed `origin` identities match their declarations, the product
 profile's full base ref exists locally, and governance/source/state/workspace roots are pairwise
@@ -129,11 +125,8 @@ Version-3 delivery can use the checked-in
 product, state, and workspace roots and preserve its executable bit. Name only the credential
 environment variables it needs in the binding; Symphony refuses missing names, scrubs them from
 candidate execution, and sends the provider a credential-free JSON request on stdin. The provider
-returns one bounded protocol-v1 observation on stdout. It admits protected proof only from the WCP
-plan/result artifacts for the exact repository, run, attempt, immutable head, plan digest, and check
-run. It first proves from GitHub's own run metadata that GitHub Actions executed the configured
-`pull_request_target` caller and exact pinned WCP reusable workflow revision. A same-named green
-check, self-consistent fake artifacts, or a run through another reusable workflow is not delivery
+returns one bounded protocol-v1 observation on stdout. It reads each configured required check from
+GitHub for the immutable delivery head. A same-named check from another commit is not delivery
 evidence.
 Treat a timeout, non-zero exit, truncated response, or invalid JSON as an ambiguous remote mutation:
 inspect exact provider truth before retrying. Never give the coding agent the provider credential as
@@ -290,7 +283,7 @@ worker/retry/cleanup outcomes. Investigate these signals first:
 | `runtime_lease outcome=retained reason=quiescence_unproven`       | descendant scope could not be proven empty; dispatch stops  |
 | `attempt outcome=retained reason=quiescence_unproven`             | worker ended but its lease remains authoritative            |
 | `preparation outcome=succeeded`                                   | frozen sandboxed dependency preparation completed           |
-| `delivery outcome=awaiting_checks`                                | exact PR exists; protected artifact verdict is not ready    |
+| `delivery outcome=awaiting_checks`                                | exact PR exists; one or more required checks are not ready  |
 | `delivery outcome=awaiting_owner`                                 | owner-gated PR is ready; Symphony will observe, not merge   |
 | `delivery outcome=completed`                                      | merge/release/guarded cleanup and Done effect were recorded |
 | `managed_workspace outcome=removed`                               | lease and independent Git checks authorized cleanup         |
@@ -385,18 +378,8 @@ from worktree directories.
 
 ## Production gate for the first target
 
-The governance, state, managed repository, preparation, and delivery implementation now has
-deterministic local evidence. WCP proof v2 and its capacity-one execution boundary exist externally.
-The first target is Dyslexify and remains gated by two integration facts:
-
-1. Spec 001 lands the final golden-principles/tracker-policy wording and republishes one accepted
-   manifest whose exact references can be pinned by the deployment binding.
-2. A disposable Dyslexify item proves the composed journey using only its thin product profile and
-   product-owned proof contract. Its existing harness is not modified during this pilot; legacy
-   lifecycle retirement occurs only after replacement evidence is complete.
-
-Do not compensate for these prerequisites with hidden paths, legacy config aliases, copied
-repository harnesses, candidate-controlled proof, or unproven recursive deletion. Resolve product,
-board, proof, and compute facts in their owning systems; keep authoring lifecycle in Symphony; and
-record the real WorkSession, attempt, base/head SHAs, workspace lease, proof plan/result, PR, and
-cleanup evidence in the deployment runbook.
+The governance, state, managed repository, preparation, and delivery implementation has
+deterministic local evidence. Before enabling a real target, pin its accepted governance publication
+and repository profile, configure its ordinary required checks, and run one disposable journey.
+Record the WorkSession, Attempt, base/head SHAs, workspace lease, required-check results, pull
+request, and cleanup evidence in the deployment runbook.

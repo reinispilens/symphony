@@ -43,7 +43,6 @@ import type { WorkflowSnapshot } from "../../src/workflow/store.js";
 import {
   acceptedGovernanceFixture,
   issue,
-  protectedProofAuthorityFixture,
   withTempDirectory,
 } from "../support/factories.js";
 
@@ -361,9 +360,8 @@ function governedConfiguration(
     deliveryGrant: {
       authority,
       governingPolicy: governance.trackerPolicy.source,
-      requiredChecks: ["proof / Protected final"],
+      requiredChecks: ["test"],
     },
-    proofAuthority: protectedProofAuthorityFixture(),
   };
 }
 

@@ -41,7 +41,6 @@ function completeDocument(): WorkSessionDocument {
       governanceManifest: GOVERNANCE.governanceManifest,
       trackerPolicy: GOVERNANCE.trackerPolicy,
       deliveryGrant: null,
-      proofAuthority: null,
     },
     controller: {
       kind: "human",
@@ -63,7 +62,7 @@ function completeDocument(): WorkSessionDocument {
     plan: {
       version: 1,
       summary: "Materialize and prove the accepted source",
-      acceptanceCriteria: ["Protected proof passes on the immutable head"],
+      acceptanceCriteria: ["Required CI checks pass on the immutable head"],
       recordedBy: "human:owner",
       recordedAt: "2026-08-25T10:00:02.000Z",
     },
@@ -145,23 +144,6 @@ function completeDocument(): WorkSessionDocument {
         updatedAt: "2026-08-25T10:05:00.000Z",
       },
     ],
-    proof: [
-      {
-        id: "proof-1",
-        checkName: "workspace-control-plane/protected-final",
-        checkRunId: "1001",
-        workflowRunId: "2001",
-        sourceSha: "c".repeat(40),
-        planDigest: "sha256:plan",
-        adapterDigest: "sha256:adapter",
-        policyDigest: "sha256:policy",
-        resultDigest: "sha256:result",
-        evidenceDigest: "sha256:evidence",
-        status: "passed",
-        recordedAt: "2026-08-25T10:06:00.000Z",
-        observedAt: "2026-08-25T10:07:00.000Z",
-      },
-    ],
     deliveryHistory: [],
     delivery: {
       phase: "completed",
@@ -173,7 +155,7 @@ function completeDocument(): WorkSessionDocument {
       remoteHeadSha: "c".repeat(40),
       requiredChecks: [
         {
-          name: "workspace-control-plane/protected-final",
+          name: "test",
           headSha: "c".repeat(40),
           checkRunId: "1001",
           workflowRunId: "2001",
@@ -194,7 +176,7 @@ function completeDocument(): WorkSessionDocument {
 }
 
 describe("WorkSession document v2", () => {
-  it("round-trips the complete configuration, materialization, proof, and delivery contract", () => {
+  it("round-trips the complete configuration, materialization, and delivery contract", () => {
     const document = completeDocument();
     expect(parseWorkSessionDocument(JSON.stringify(document))).toEqual(
       document,

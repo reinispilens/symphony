@@ -462,7 +462,7 @@ function parseRepositoryProfile(bytes: Buffer): RepositoryProfileDocument {
       invalid(
         "profile",
         "repository profile.deliveryGrant.requiredChecks",
-        "must contain at least one protected required check",
+        "must contain at least one required check",
       );
     }
     if (
@@ -657,95 +657,6 @@ function parseGovernance(value: unknown): GovernanceBinding {
   };
 }
 
-function githubWorkflowPath(value: unknown, location: string): string {
-  const result = repositoryPath(value, location, "binding");
-  if (
-    !result.startsWith(".github/workflows/") ||
-    (!result.endsWith(".yml") && !result.endsWith(".yaml"))
-  ) {
-    invalid(
-      "binding",
-      location,
-      "must identify a YAML file under .github/workflows/",
-    );
-  }
-  return result;
-}
-
-function parseProofAuthority(
-  value: unknown,
-): NonNullable<DeliveryProviderBinding["proofAuthority"]> {
-  const source = strictObject(
-    value,
-    "binding.deliveryProvider.proofAuthority",
-    [
-      "kind",
-      "requiredCheck",
-      "eventName",
-      "callerWorkflowPath",
-      "controlWorkflow",
-    ],
-    "binding",
-  );
-  if (source["kind"] !== "github-actions-reusable-workflow-v1") {
-    invalid(
-      "binding",
-      "binding.deliveryProvider.proofAuthority.kind",
-      "must be 'github-actions-reusable-workflow-v1'",
-    );
-  }
-  if (source["eventName"] !== "pull_request_target") {
-    invalid(
-      "binding",
-      "binding.deliveryProvider.proofAuthority.eventName",
-      "must be 'pull_request_target'",
-    );
-  }
-  const control = strictObject(
-    source["controlWorkflow"],
-    "binding.deliveryProvider.proofAuthority.controlWorkflow",
-    ["repositoryIdentity", "path", "revision"],
-    "binding",
-  );
-  const revision = nonEmptyString(
-    control["revision"],
-    "binding.deliveryProvider.proofAuthority.controlWorkflow.revision",
-    "binding",
-  );
-  if (!/^[0-9a-f]{40}$/u.test(revision)) {
-    invalid(
-      "binding",
-      "binding.deliveryProvider.proofAuthority.controlWorkflow.revision",
-      "must be a full lowercase Git SHA-1",
-    );
-  }
-  return {
-    kind: "github-actions-reusable-workflow-v1",
-    requiredCheck: nonEmptyString(
-      source["requiredCheck"],
-      "binding.deliveryProvider.proofAuthority.requiredCheck",
-      "binding",
-    ),
-    eventName: "pull_request_target",
-    callerWorkflowPath: githubWorkflowPath(
-      source["callerWorkflowPath"],
-      "binding.deliveryProvider.proofAuthority.callerWorkflowPath",
-    ),
-    controlWorkflow: {
-      repositoryIdentity: repositoryIdentity(
-        control["repositoryIdentity"],
-        "binding.deliveryProvider.proofAuthority.controlWorkflow.repositoryIdentity",
-        "binding",
-      ),
-      path: githubWorkflowPath(
-        control["path"],
-        "binding.deliveryProvider.proofAuthority.controlWorkflow.path",
-      ),
-      revision,
-    },
-  };
-}
-
 function numberMap(
   value: unknown,
   location: string,
@@ -919,9 +830,6 @@ function parseDeploymentBinding(bytes: Buffer): DeploymentBindingDocument {
             "executable",
             "timeoutMs",
             "secretEnvironmentNames",
-            ...(schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
-              ? ["proofAuthority"]
-              : []),
           ],
           "binding",
         );
@@ -1012,10 +920,6 @@ function parseDeploymentBinding(bytes: Buffer): DeploymentBindingDocument {
                     1,
                   ),
                   secretEnvironmentNames: deliverySecretNames,
-                  proofAuthority:
-                    schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
-                      ? parseProofAuthority(deliveryProvider["proofAuthority"])
-                      : null,
                 },
         }),
     ...(schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
@@ -1619,17 +1523,6 @@ export async function resolveDeploymentBinding(
       "Deployment delivery-provider authority must be present exactly when the accepted product profile contains a delivery grant",
     );
   }
-  if (
-    binding.deliveryProvider?.proofAuthority !== null &&
-    binding.deliveryProvider?.proofAuthority !== undefined &&
-    !profile.deliveryGrant?.requiredChecks.includes(
-      binding.deliveryProvider.proofAuthority.requiredCheck,
-    )
-  ) {
-    refuse(
-      "Deployment proof authority must identify one check in the accepted product delivery grant",
-    );
-  }
   const baseSha = await git(gitExecutable, sourceRoot, [
     "rev-parse",
     "--verify",
@@ -1709,7 +1602,6 @@ export async function resolveDeploymentBinding(
     governanceManifest: governance?.manifestReference ?? null,
     trackerPolicy: governance?.trackerPolicy ?? null,
     deliveryGrant: profile.deliveryGrant,
-    proofAuthority: binding.deliveryProvider?.proofAuthority ?? null,
   };
 
   if (
@@ -1831,7 +1723,6 @@ export async function resolveDeploymentBinding(
           : {
               ...binding.deliveryProvider,
               executable: deliveryProviderExecutable,
-              proofAuthority: binding.deliveryProvider.proofAuthority ?? null,
             },
       preparation: preparationAuthority,
       processContainment: {

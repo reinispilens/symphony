@@ -246,7 +246,7 @@ async function selectDeliveryGrant(
       revision: "2".repeat(40),
       digest: `sha256:${"3".repeat(64)}`,
     },
-    requiredChecks: ["proof / Protected final"],
+    requiredChecks: ["test"],
   };
   const profileBytes = `${JSON.stringify(profile, null, 2)}\n`;
   await writeFile(profileFile, profileBytes);
@@ -395,7 +395,7 @@ async function selectAcceptedGovernance(setup: Fixture): Promise<V3Fixture> {
       revision: acceptedRevision,
       digest: digest(policyBytes),
     },
-    requiredChecks: ["proof / Protected final"],
+    requiredChecks: ["test"],
   };
   const profileBytes = `${JSON.stringify(profile, null, 2)}\n`;
   await writeFile(profileFile, profileBytes);
@@ -449,17 +449,6 @@ async function selectAcceptedGovernance(setup: Fixture): Promise<V3Fixture> {
       executable: providerExecutable,
       timeoutMs: 30_000,
       secretEnvironmentNames: ["DELIVERY_TOKEN"],
-      proofAuthority: {
-        kind: "github-actions-reusable-workflow-v1",
-        requiredCheck: "proof / Protected final",
-        eventName: "pull_request_target",
-        callerWorkflowPath: ".github/workflows/protected-proof-v2.yml",
-        controlWorkflow: {
-          repositoryIdentity: "reinispilens/workspace-control-plane",
-          path: ".github/workflows/protected-proof-v2.yml",
-          revision: "4".repeat(40),
-        },
-      },
     },
   };
   await writeFile(setup.bindingPath, `${JSON.stringify(binding, null, 2)}\n`);
@@ -507,9 +496,6 @@ describe("deployment binding resolver", () => {
       expect(
         resolved.acceptedConfiguration.deliveryGrant?.governingPolicy,
       ).toEqual(resolved.acceptedConfiguration.trackerPolicy?.source);
-      expect(resolved.acceptedConfiguration.proofAuthority).toEqual(
-        accepted.binding.deliveryProvider?.proofAuthority,
-      );
       expect(resolved.serviceConfig.tracker).toMatchObject({
         requiredLabels: ["driver:symphony"],
         excludedLabels: ["driver:direct"],
@@ -545,13 +531,11 @@ describe("deployment binding resolver", () => {
           revision: "2".repeat(40),
           digest: `sha256:${"3".repeat(64)}`,
         },
-        requiredChecks: ["proof / Protected final"],
+        requiredChecks: ["test"],
       });
       expect(resolved.serviceConfig.deployment?.deliveryProvider).toEqual({
         ...binding.deliveryProvider,
-        proofAuthority: null,
       });
-      expect(resolved.acceptedConfiguration.proofAuthority).toBeNull();
       expect(resolved.serviceConfig.tracker.secretEnvironmentNames).toContain(
         "DELIVERY_TOKEN",
       );

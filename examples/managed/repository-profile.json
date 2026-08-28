@@ -15,6 +15,6 @@
       "revision": "0000000000000000000000000000000000000000",
       "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     },
-    "requiredChecks": ["proof / Protected proof v2 / final"]
+    "requiredChecks": ["test"]
   }
 }

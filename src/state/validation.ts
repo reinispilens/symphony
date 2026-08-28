@@ -12,7 +12,6 @@ import {
   type DoctrineSnapshot,
   type HumanWorkspaceAttachment,
   type PreparationRecord,
-  type ProofCorrelation,
   type RequiredCheckObservation,
   type RetryIntent,
   type RuntimeLease,
@@ -279,18 +278,6 @@ function parseConfiguration(
           delivery["governingPolicy"],
           "document.configuration.deliveryGrant.governingPolicy",
         );
-  const proofValue = source["proofAuthority"];
-  const proofAuthority =
-    proofValue === undefined || proofValue === null
-      ? null
-      : record(proofValue, "document.configuration.proofAuthority");
-  const controlWorkflow =
-    proofAuthority === null
-      ? null
-      : record(
-          proofAuthority["controlWorkflow"],
-          "document.configuration.proofAuthority.controlWorkflow",
-        );
   return {
     productProfile: {
       repositoryIdentity: nonEmptyString(
@@ -391,43 +378,6 @@ function parseConfiguration(
                 `document.configuration.deliveryGrant.requiredChecks[${index}]`,
               ),
             ),
-          },
-    proofAuthority:
-      proofAuthority === null || controlWorkflow === null
-        ? null
-        : {
-            kind: oneOf(
-              proofAuthority["kind"],
-              "document.configuration.proofAuthority.kind",
-              ["github-actions-reusable-workflow-v1"] as const,
-            ),
-            requiredCheck: nonEmptyString(
-              proofAuthority["requiredCheck"],
-              "document.configuration.proofAuthority.requiredCheck",
-            ),
-            eventName: oneOf(
-              proofAuthority["eventName"],
-              "document.configuration.proofAuthority.eventName",
-              ["pull_request_target"] as const,
-            ),
-            callerWorkflowPath: nonEmptyString(
-              proofAuthority["callerWorkflowPath"],
-              "document.configuration.proofAuthority.callerWorkflowPath",
-            ),
-            controlWorkflow: {
-              repositoryIdentity: nonEmptyString(
-                controlWorkflow["repositoryIdentity"],
-                "document.configuration.proofAuthority.controlWorkflow.repositoryIdentity",
-              ),
-              path: nonEmptyString(
-                controlWorkflow["path"],
-                "document.configuration.proofAuthority.controlWorkflow.path",
-              ),
-              revision: nonEmptyString(
-                controlWorkflow["revision"],
-                "document.configuration.proofAuthority.controlWorkflow.revision",
-              ),
-            },
           },
   };
 }
@@ -957,49 +907,6 @@ function parseMaterializations(
   });
 }
 
-function parseProof(value: unknown): readonly ProofCorrelation[] {
-  return array(value, "document.proof").map((entry, index) => {
-    const path = `document.proof[${index}]`;
-    const source = record(entry, path);
-    return {
-      id: nonEmptyString(source["id"], `${path}.id`),
-      checkName: nullableString(source["checkName"], `${path}.checkName`),
-      checkRunId: nullableString(source["checkRunId"], `${path}.checkRunId`),
-      workflowRunId: nullableString(
-        source["workflowRunId"],
-        `${path}.workflowRunId`,
-      ),
-      sourceSha: nonEmptyString(source["sourceSha"], `${path}.sourceSha`),
-      planDigest: nonEmptyString(source["planDigest"], `${path}.planDigest`),
-      adapterDigest: nullableString(
-        source["adapterDigest"],
-        `${path}.adapterDigest`,
-      ),
-      policyDigest: nullableString(
-        source["policyDigest"],
-        `${path}.policyDigest`,
-      ),
-      resultDigest: nullableString(
-        source["resultDigest"],
-        `${path}.resultDigest`,
-      ),
-      evidenceDigest: nullableString(
-        source["evidenceDigest"],
-        `${path}.evidenceDigest`,
-      ),
-      status: oneOf(source["status"], `${path}.status`, [
-        "pending",
-        "passed",
-        "failed",
-        "setup_refused",
-        "non_verdict",
-      ] as const),
-      recordedAt: nonEmptyString(source["recordedAt"], `${path}.recordedAt`),
-      observedAt: nullableString(source["observedAt"], `${path}.observedAt`),
-    };
-  });
-}
-
 function parseRequiredChecks(
   value: unknown,
 ): readonly RequiredCheckObservation[] {
@@ -1123,7 +1030,6 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
       governanceManifest,
       trackerPolicy,
       deliveryGrant,
-      proofAuthority,
     } = document.configuration;
     if (
       productProfile.repositoryIdentity !== document.repositoryIdentity ||
@@ -1265,54 +1171,6 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
           "must be ordered by check name",
         );
       }
-    }
-    if (proofAuthority !== null) {
-      if (deliveryGrant === null) {
-        corrupt(
-          "document.configuration.proofAuthority",
-          "requires a product delivery grant",
-        );
-      }
-      if (
-        !deliveryGrant.requiredChecks.includes(proofAuthority.requiredCheck)
-      ) {
-        corrupt(
-          "document.configuration.proofAuthority.requiredCheck",
-          "must identify one check in the product delivery grant",
-        );
-      }
-      if (
-        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(
-          proofAuthority.controlWorkflow.repositoryIdentity,
-        )
-      ) {
-        corrupt(
-          "document.configuration.proofAuthority.controlWorkflow.repositoryIdentity",
-          "must use owner/repository form",
-        );
-      }
-      for (const [workflowPath, location] of [
-        [proofAuthority.callerWorkflowPath, "callerWorkflowPath"],
-        [proofAuthority.controlWorkflow.path, "controlWorkflow.path"],
-      ] as const) {
-        assertRepositoryRelativePath(
-          workflowPath,
-          `document.configuration.proofAuthority.${location}`,
-        );
-        if (
-          !workflowPath.startsWith(".github/workflows/") ||
-          (!workflowPath.endsWith(".yml") && !workflowPath.endsWith(".yaml"))
-        ) {
-          corrupt(
-            `document.configuration.proofAuthority.${location}`,
-            "must identify a YAML file under .github/workflows/",
-          );
-        }
-      }
-      assertGitSha(
-        proofAuthority.controlWorkflow.revision,
-        "document.configuration.proofAuthority.controlWorkflow.revision",
-      );
     }
     assertUnique(
       authoringContext.entries.map((entry) => entry.path),
@@ -1871,35 +1729,6 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
     }
   }
 
-  assertUnique(
-    document.proof.map((entry) => entry.id),
-    "document.proof",
-    "proof correlation id",
-  );
-  for (const [index, proof] of document.proof.entries()) {
-    const path = `document.proof[${index}]`;
-    assertGitSha(proof.sourceSha, `${path}.sourceSha`);
-    assertSha256(proof.planDigest, `${path}.planDigest`);
-    for (const [name, digest] of [
-      ["adapterDigest", proof.adapterDigest],
-      ["policyDigest", proof.policyDigest],
-      ["resultDigest", proof.resultDigest],
-      ["evidenceDigest", proof.evidenceDigest],
-    ] as const) {
-      if (digest !== null) assertSha256(digest, `${path}.${name}`);
-    }
-    timestamp(proof.recordedAt, `${path}.recordedAt`);
-    if (proof.status === "pending") {
-      if (proof.observedAt !== null) {
-        corrupt(`${path}.observedAt`, "must be null while proof is pending");
-      }
-    } else if (proof.observedAt === null) {
-      corrupt(`${path}.observedAt`, "must be present for terminal proof");
-    } else {
-      timestamp(proof.observedAt, `${path}.observedAt`);
-    }
-  }
-
   const historicalMaterializations = new Set<string>();
   for (const [index, delivery] of document.deliveryHistory.entries()) {
     const path = `document.deliveryHistory[${index}]`;
@@ -2155,7 +1984,6 @@ export function parseWorkSessionDocument(source: string): WorkSessionDocument {
     attempts: parseAttempts(value["attempts"]),
     retry: parseRetry(value["retry"]),
     materializations: parseMaterializations(value["materializations"]),
-    proof: parseProof(value["proof"]),
     deliveryHistory:
       value["deliveryHistory"] === undefined
         ? []

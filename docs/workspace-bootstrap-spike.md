@@ -58,7 +58,7 @@ leaves any entry at the path, Symphony logs and retains that entry instead of ap
 recursive delete. The Symphony-owned Git-worktree driver now preserves that safe
 refusal while moving implementation and lease authority out of the target repository. Real-Git
 fixtures cover allocation-before-effect, recovery, generation replacement, and guarded removal;
-protected proof and a real product pilot remain separate evidence.
+managed delivery and a real product pilot remain separate evidence.
 
 ## What this spike does not prove
 

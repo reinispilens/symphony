@@ -66,23 +66,6 @@ export interface DeliveryGrantSnapshot {
   readonly requiredChecks: readonly string[];
 }
 
-/**
- * Operator-owned trust anchor for admitting one protected GitHub Actions proof.
- * The product names the required check; the deployment proves which reusable
- * workflow is allowed to establish that check's authoritative result.
- */
-export interface ProtectedProofAuthoritySnapshot {
-  readonly kind: "github-actions-reusable-workflow-v1";
-  readonly requiredCheck: string;
-  readonly eventName: "pull_request_target";
-  readonly callerWorkflowPath: string;
-  readonly controlWorkflow: {
-    readonly repositoryIdentity: string;
-    readonly path: string;
-    readonly revision: string;
-  };
-}
-
 export interface AcceptedConfigurationSnapshot {
   readonly productProfile: RepositoryContentSnapshot;
   readonly authoringContext: AuthoringContextSnapshot;
@@ -93,8 +76,6 @@ export interface AcceptedConfigurationSnapshot {
   readonly trackerPolicy: TrackerPolicySnapshot | null;
   /** Null only for the version-1 managed-profile compatibility path. */
   readonly deliveryGrant: DeliveryGrantSnapshot | null;
-  /** Null only when delivery is absent or for historical binding v1/v2 records. */
-  readonly proofAuthority: ProtectedProofAuthoritySnapshot | null;
 }
 
 export interface ControllerAssignment {
@@ -275,23 +256,6 @@ export interface RetryIntent {
   readonly recordedAt: string;
 }
 
-export interface ProofCorrelation {
-  readonly id: string;
-  readonly checkName: string | null;
-  readonly checkRunId: string | null;
-  readonly workflowRunId: string | null;
-  readonly sourceSha: string;
-  readonly planDigest: string;
-  readonly adapterDigest: string | null;
-  readonly policyDigest: string | null;
-  readonly resultDigest: string | null;
-  readonly evidenceDigest: string | null;
-  readonly status:
-    "pending" | "passed" | "failed" | "setup_refused" | "non_verdict";
-  readonly recordedAt: string;
-  readonly observedAt: string | null;
-}
-
 export type MaterializationPhase =
   | "intent_recorded"
   | "snapshot_recorded"
@@ -443,13 +407,6 @@ export interface TransitionDeliveryInput {
   readonly now: string;
 }
 
-export interface RecordProofInput {
-  readonly sessionId: string;
-  readonly controllerGeneration: number;
-  readonly proof: ProofCorrelation;
-  readonly now: string;
-}
-
 export interface WorkSessionDocument {
   readonly schemaVersion: typeof WORK_SESSION_SCHEMA_VERSION;
   readonly id: string;
@@ -467,7 +424,6 @@ export interface WorkSessionDocument {
   readonly attempts: readonly AttemptRecord[];
   readonly retry: RetryIntent | null;
   readonly materializations: readonly SourceMaterializationRecord[];
-  readonly proof: readonly ProofCorrelation[];
   /** Terminal prior deliveries, archived only when a later materialization begins delivery. */
   readonly deliveryHistory: readonly DeliveryState[];
   readonly delivery: DeliveryState | null;

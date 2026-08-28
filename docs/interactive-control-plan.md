@@ -1,14 +1,12 @@
 # Manual WorkSession MVP plan
 
-- Status: approved follow-on phase of
-  [`orchestration-estate-alignment-plan.md`](orchestration-estate-alignment-plan.md)
+- Status: approved follow-on feature; not yet implemented
 - Recorded: 2026-08-25; revised after whole-plan state and authority review
 - Repository: Symphony
-- Technical prerequisites: the alignment plan's WorkSession store, accepted product/deployment
+- Technical prerequisites: the WorkSession store, accepted product/deployment
   resolver, and accepted-doctrine resolver
-- Rollout gate: scheduled after the RepositoryDriver, protected proof, delivery, doctrine/template
-  alignment, and Dyslexify autonomous pilot so the estate finishes one migration path before opening
-  a second control surface
+- Rollout gate: implement only from a dedicated specification after the existing managed path is
+  stable in ordinary use
 - MVP commands: `start`, `attach`, `plan`, `steer`, and `status`
 - Later extension: controller handoff
 
@@ -26,7 +24,7 @@
       autonomous board work              current chat/CLI work
                  │                                 │
                  └──────── same attempts, workspaces,
-                           doctrine, decisions, proof,
+                           doctrine, decisions, checks,
                            delivery and evidence ───────┘
 ```
 
@@ -69,9 +67,8 @@ This ordering avoids two previous design errors:
    Every operation uses the same transactional `SymphonyStateStore` and fencing rules.
 
 Most of the rollout gate is sequencing, not technical coupling. `start`, `attach`, `plan`, `steer`,
-and `status` do not call WCP or delivery. Waiting until after the autonomous pilot keeps the current
-estate migration focused; it must not cause the manual application service to import those systems
-or pretend they are needed for a boardless record.
+and `status` do not call delivery. The manual application service must not import delivery merely to
+create a boardless record.
 
 One WorkSession binds one repository identity and one accepted Symphony deployment binding. A
 cross-repository program such as the estate migration remains a coordinating plan plus separate
@@ -102,7 +99,7 @@ local user command may start boardless interactive work.
 - Managed-worktree creation from the manual CLI.
 - Doctrine rebase for an existing session.
 - MCP, HTTP, editor, or chat-provider integration.
-- Capturing or uploading a dirty checkout as protected proof source.
+- Treating a dirty checkout as the source of an ordinary CI result.
 - Atomic multi-repository WorkSessions or a program-management layer.
 
 The CLI can grow only after a real journey proves a missing operation. Command breadth is not the
@@ -128,7 +125,7 @@ WorkSession
 ├── 0..n Attempts
 │   ├── 0..1 fenced runtime lease
 │   └── 0..1 managed or compatibility workspace lease
-├── source-materialization + proof correlations
+├── source-materialization + required-check observations
 └── delivery saga
 ```
 
@@ -191,20 +188,18 @@ references but does not inject them into an already-running external coding clie
 route that client to the recorded context. Automatic client integration is a later transport
 feature, not hidden behavior of `attach`.
 
-## Proof boundary for dirty attached work
+## Verification boundary for dirty attached work
 
-Workspace Control Plane proves immutable source. A dirty checkout has no Git source identity that a
-fresh VM can reconstruct, so its local tests are useful feedback but not authoritative protected
-proof.
+A dirty checkout has no immutable Git source identity that CI can reconstruct, so its local tests
+are useful feedback but are not the required-check result for a delivered commit.
 
 ```text
-attached dirty checkout ──► local/advisory evidence only
+attached dirty checkout ──► local feedback only
 
-committed immutable SHA ──► WCP protected plan, execution and verdict
+committed immutable SHA ──► ordinary CI required checks
 ```
 
 The MVP reports this distinction in `status`; it does not invent a content-snapshot upload protocol.
-Such a protocol may be designed later if real manual journeys need pre-commit protected proof.
 
 ## CLI contract
 
@@ -249,7 +244,7 @@ controller and cited as `EXCEPTION GP-xx: <reason>`.
 
 Reads without acquiring control. Human output begins with intent and recorded WorkSession state,
 then plan,
-workspace ownership, active attempt/runtime lease, proof authority, delivery state, doctrine digest,
+workspace ownership, active attempt/runtime lease, required checks, delivery state, doctrine digest,
 and the latest steering decisions. `--json` exposes a versioned projection, never raw database rows.
 
 ## Implementation phases
@@ -334,8 +329,8 @@ Pilot the exact workflow that motivated the feature:
    surface or reusable bearer secret appears in the MVP.
 9. **Privacy:** state and logs contain structured intent/decisions, not transcript bodies, secrets,
    environment dumps, or repository file contents.
-10. **Proof honesty:** dirty attached state is visibly advisory; committed source may reference a WCP
-    protected result only when SHA and plan digest match.
+10. **Verification honesty:** dirty attached state is visibly local; delivered source records only
+    required checks observed on its exact immutable commit.
 11. **Doctrine continuity:** a new session pins the accepted source; later amendments affect new
     sessions, not the existing one; only the human controller can accept `EXCEPTION GP-xx`.
 

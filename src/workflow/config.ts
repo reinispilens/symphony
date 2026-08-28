@@ -91,7 +91,6 @@ export interface DeploymentAuthorityConfig {
     readonly executable: string;
     readonly timeoutMs: number;
     readonly secretEnvironmentNames: readonly string[];
-    readonly proofAuthority: AcceptedConfigurationSnapshot["proofAuthority"];
   } | null;
   readonly preparation: ManagedPnpmPreparationAuthorityConfig | null;
   readonly processContainment: ManagedProcessContainmentConfig;

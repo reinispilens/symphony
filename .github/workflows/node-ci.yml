@@ -1,0 +1,47 @@
+name: Node CI
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: symphony-node-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, ws-light]
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.2
+          check-latest: false
+
+      - name: Install exact pnpm
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/symphony-pnpm" --ignore-scripts pnpm@11.3.0
+          echo "$RUNNER_TEMP/symphony-pnpm/bin" >> "$GITHUB_PATH"
+
+      - name: Install exact dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run ordinary repository checks
+        run: pnpm check
+
+      - name: Build
+        run: pnpm build

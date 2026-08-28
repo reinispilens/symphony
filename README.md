@@ -24,7 +24,7 @@ GitHub Project ──poll──▶ durable WorkSession + fenced Attempt
                                 ├── RepositoryDriver ─────▶ managed Git worktree
                                 ├── sandboxed preparation ▶ frozen dependencies
                                 ├── systemd scope ────────▶ Codex app-server + descendants
-                                └── delivery saga ────────▶ PR + exact WCP proof + cleanup
+                                └── delivery saga ────────▶ PR + exact-head CI + cleanup
 
 SQLite under the operator-selected state root records the complete WorkSession aggregate and
 effects. One daemon owns one accepted binding, one repository, and one Project.
@@ -33,14 +33,14 @@ effects. One daemon owns one accepted binding, one repository, and one Project.
 Symphony owns coordination and generic authoring mechanics: polling, claims, concurrency, durable
 retries, fenced attempts, managed Git worktrees, preparation, cancellation, and restart recovery.
 The GitHub Projects adapter owns provider-specific scope and routing. The product repository owns
-its code, tests, proof meaning, and a thin trusted profile; it does not implement Symphony's
+its code, tests, required check names, and a thin trusted profile; it does not implement Symphony's
 worktree lifecycle.
 
 `workspace.provider: harness` remains available only to drain existing consumers. New integrations
 use the implemented [`repository-driver boundary`](docs/repository-driver-boundary.md) and must not
 copy lifecycle machinery into target repositories. Accepted-governance resolution, lane-aware
-authoring, durable delivery, and exact WCP proof correlation are implemented here. The real
-Dyslexify journey and manual WorkSession commands remain separate acceptance gates.
+authoring, durable delivery, and exact-head required-check observation are implemented here. Manual
+WorkSession commands remain a separate future feature.
 
 ## Requirements
 
@@ -96,7 +96,7 @@ The product repository commits a thin `.symphony/repository-profile.json` and it
       "revision": "0000000000000000000000000000000000000000",
       "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     },
-    "requiredChecks": ["proof / Protected proof v2 / final"]
+    "requiredChecks": ["test"]
   }
 }
 ```
@@ -114,17 +114,15 @@ When the accepted profile selects `preparationClass: "none"`, the binding sets `
 `null`; Symphony neither requires nor validates an unused pnpm toolchain or seed. A missing or
 extra pnpm authority is a profile/binding mismatch and is refused.
 
-A version-3 binding names one operator-owned delivery-provider executable, only the secret
-environment-variable names it receives, and one protected-proof trust anchor. That anchor maps one
-product-required check to an exact `pull_request_target` caller path and an immutable Workspace
-Control Plane repository/workflow/SHA. This repository ships the GitHub implementation as
+A version-3 binding names one operator-owned delivery-provider executable and only the secret
+environment-variable names it receives. This repository ships the GitHub implementation as
 `bin/symphony-github-delivery.mjs`. It performs credentialed hosting operations from typed,
 credential-free requests; candidate execution never receives those credentials. Symphony
-materializes edited source through its own bounded manifest and temporary index, then correlates
-push, PR, exact-head protected checks, host-authenticated workflow identity, and WCP artifacts,
-grant-constrained merge, Rework abandonment, and cleanup durably across restart. Version-1 and
-version-2 bindings remain readable for migration and historical state, but they cannot start a new
-managed Attempt because they do not select accepted governance.
+materializes edited source through its own bounded manifest and temporary index, then records push,
+pull request, each configured required check on the immutable head, grant-constrained merge, Rework
+abandonment, and cleanup durably across restart. Version-1 and version-2 bindings remain readable
+for migration and historical state, but they cannot start a new managed Attempt because they do not
+select accepted governance.
 
 Run only the binding for a managed repository:
 
@@ -223,8 +221,6 @@ runtime-quiescence checks complete.
   records the remaining real-environment gate.
 - [`docs/repository-driver-boundary.md`](docs/repository-driver-boundary.md) records the implemented
   Symphony-owned repository lifecycle and thin-adapter contract.
-- [`docs/dyslexify-orchestration-handoff.md`](docs/dyslexify-orchestration-handoff.md) records the
-  corrected ownership and planning lessons from the Dyslexify pilot.
 
 No HTTP server, dashboard, or manual WorkSession CLI is shipped yet. The Project is the current
 human control surface; the daemon also exposes an in-process, read-only runtime snapshot whose
@@ -233,15 +229,13 @@ attempt and retry facts are projected from durable WorkSession state.
 ## Current deployment boundary
 
 The durable WorkSession store uses one version-2 aggregate contract: accepted
-product/context/binding inputs, accepted doctrine/manifest/policy and WCP-trust snapshots, plans and
-decisions, human attachments outside Attempt leases, materialization/proof/delivery records, and
+product/context/binding inputs, accepted doctrine/manifest/policy snapshots, plans and decisions,
+human attachments outside Attempt leases, materialization/delivery records, and
 fenced attempts/retries/outbox all share one transactional root. The managed Git-worktree driver,
 accepted-governance composition, exact Codex sandbox/systemd scope, offline-only pnpm preparation,
-lane-aware reconciliation, built-in GitHub delivery provider, and host-authenticated WCP workflow
-and artifact correlation are implemented and covered by deterministic and real-Git/process
-fixtures. Production readiness still
-requires the final accepted-governance repin and a recorded Dyslexify end-to-end journey. No product
-repository should fill those gates with another local harness.
+lane-aware reconciliation, and built-in GitHub delivery provider are implemented and covered by
+deterministic and real-Git/process fixtures. A production deployment still needs its own accepted
+governance publication, repository profile, operator binding, and ordinary required checks.
 
 ## License
 

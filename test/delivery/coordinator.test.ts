@@ -8,21 +8,15 @@ import type {
   PullRequestObservation,
   TrackerDeliveryAuthority,
 } from "../../src/delivery/provider.js";
-import type {
-  ProofCorrelation,
-  RequiredCheckObservation,
-} from "../../src/state/model.js";
+import type { RequiredCheckObservation } from "../../src/state/model.js";
 import { SqliteSymphonyStateStore } from "../../src/state/sqlite-store.js";
-import {
-  acceptedGovernanceFixture,
-  protectedProofAuthorityFixture,
-} from "../support/factories.js";
+import { acceptedGovernanceFixture } from "../support/factories.js";
 
 const START = "2026-08-26T10:00:00.000Z";
 const BASE_SHA = "a".repeat(40);
 const HEAD_SHA = "d".repeat(40);
 const MERGE_SHA = "e".repeat(40);
-const CHECK_NAME = "proof / Protected final";
+const CHECK_NAME = "test";
 
 function configuration(authority: "owner-gated" | "full-in-scope") {
   const governance = acceptedGovernanceFixture();
@@ -47,7 +41,6 @@ function configuration(authority: "owner-gated" | "full-in-scope") {
       governingPolicy: governance.trackerPolicy.source,
       requiredChecks: [CHECK_NAME],
     },
-    proofAuthority: protectedProofAuthorityFixture(CHECK_NAME),
   } as const;
 }
 
@@ -103,24 +96,6 @@ function passedCheck(headSha = HEAD_SHA): RequiredCheckObservation {
   };
 }
 
-function passedProof(headSha = HEAD_SHA): ProofCorrelation {
-  return {
-    id: "proof-1",
-    checkName: CHECK_NAME,
-    checkRunId: "check-1",
-    workflowRunId: "workflow-1",
-    sourceSha: headSha,
-    planDigest: `sha256:${"1".repeat(64)}`,
-    adapterDigest: `sha256:${"2".repeat(64)}`,
-    policyDigest: `sha256:${"3".repeat(64)}`,
-    resultDigest: `sha256:${"4".repeat(64)}`,
-    evidenceDigest: `sha256:${"5".repeat(64)}`,
-    status: "passed",
-    recordedAt: "2026-08-26T10:00:30.000Z",
-    observedAt: "2026-08-26T10:01:00.000Z",
-  };
-}
-
 class FakeDeliveryProvider implements DeliveryProvider {
   remoteHeadSha: string | null = null;
   pullRequest: PullRequestObservation | null = null;
@@ -133,7 +108,6 @@ class FakeDeliveryProvider implements DeliveryProvider {
       observedAt: null,
     },
   ];
-  proof: readonly ProofCorrelation[] = [];
   failAfterPushOnce = false;
   readonly calls: DeliveryProviderRequest[] = [];
 
@@ -206,7 +180,6 @@ class FakeDeliveryProvider implements DeliveryProvider {
       remoteHeadSha: this.remoteHeadSha,
       pullRequest: this.pullRequest,
       requiredChecks: this.requiredChecks,
-      proof: this.proof,
     };
   }
 
@@ -489,7 +462,7 @@ describe("DeliveryCoordinator", () => {
     }
   });
 
-  it("waits for the owner after exact-head proof and adopts an external merge", async () => {
+  it("waits for the owner after exact-head checks and adopts an external merge", async () => {
     const setup = fixture("owner-gated");
     try {
       const first = await setup.coordinator().start({
@@ -503,7 +476,6 @@ describe("DeliveryCoordinator", () => {
       expect(setup.provider.count("open_pull_request")).toBe(1);
 
       setup.provider.requiredChecks = [passedCheck()];
-      setup.provider.proof = [passedProof()];
       const review = await setup.coordinator().resume({
         sessionId: setup.sessionId,
         controllerGeneration: setup.started.controllerGeneration,
@@ -541,7 +513,6 @@ describe("DeliveryCoordinator", () => {
         phase: "completed",
         cleanupStatus: "completed",
       });
-      expect(completed.proof).toEqual([passedProof()]);
     } finally {
       setup.store.close();
     }
@@ -551,7 +522,6 @@ describe("DeliveryCoordinator", () => {
     const setup = fixture("full-in-scope");
     try {
       setup.provider.requiredChecks = [passedCheck()];
-      setup.provider.proof = [passedProof()];
       const outcome = await setup.coordinator().start({
         sessionId: setup.sessionId,
         materializationId: setup.materializationId,
@@ -581,7 +551,6 @@ describe("DeliveryCoordinator", () => {
       });
       expect(pending.status).toBe("awaiting_checks");
       setup.provider.requiredChecks = [passedCheck()];
-      setup.provider.proof = [passedProof()];
       setup.provider.pullRequest = {
         ...setup.provider.pullRequest!,
         state: "merged",
@@ -598,7 +567,6 @@ describe("DeliveryCoordinator", () => {
         status: "cleanup_required",
         session: { delivery: { mergeSha: MERGE_SHA } },
       });
-      expect(outcome.session.proof).toEqual([passedProof()]);
       expect(setup.provider.count("delete_remote_branch")).toBe(0);
     } finally {
       setup.store.close();
@@ -620,7 +588,6 @@ describe("DeliveryCoordinator", () => {
       expect(setup.provider.count("open_pull_request")).toBe(1);
 
       setup.provider.requiredChecks = [passedCheck()];
-      setup.provider.proof = [passedProof()];
       await expect(
         setup.coordinator().resume({
           sessionId: setup.sessionId,
@@ -650,17 +617,15 @@ describe("DeliveryCoordinator", () => {
         code: "delivery_refused",
         message: expect.stringContaining("not ddddd"),
       });
-      expect(setup.store.getSession(setup.sessionId)?.proof).toEqual([]);
     } finally {
       setup.store.close();
     }
   });
 
-  it("refuses a green check without an exact passed protected-proof correlation", async () => {
+  it("accepts an ordinary exact-head passed check without a separate proof record", async () => {
     const setup = fixture("owner-gated");
     try {
       setup.provider.requiredChecks = [passedCheck()];
-      setup.provider.proof = [];
       await expect(
         setup.coordinator().start({
           sessionId: setup.sessionId,
@@ -668,24 +633,18 @@ describe("DeliveryCoordinator", () => {
           controllerGeneration: setup.started.controllerGeneration,
           tracker: trackerAuthority(),
         }),
-      ).rejects.toMatchObject({
-        code: "delivery_refused",
-        message: expect.stringContaining("protected-proof correlation"),
-      });
+      ).resolves.toMatchObject({ status: "awaiting_owner" });
     } finally {
       setup.store.close();
     }
   });
 
-  it("refuses proof correlation without concrete check and workflow run identities", async () => {
+  it("accepts a passed ordinary check without a workflow-run identity", async () => {
     const setup = fixture("owner-gated");
     try {
       setup.provider.requiredChecks = [
         { ...passedCheck(), checkRunId: null, workflowRunId: null },
       ];
-      setup.provider.proof = [
-        { ...passedProof(), checkRunId: null, workflowRunId: null },
-      ];
       await expect(
         setup.coordinator().start({
           sessionId: setup.sessionId,
@@ -693,7 +652,7 @@ describe("DeliveryCoordinator", () => {
           controllerGeneration: setup.started.controllerGeneration,
           tracker: trackerAuthority(),
         }),
-      ).rejects.toMatchObject({ code: "delivery_refused" });
+      ).resolves.toMatchObject({ status: "awaiting_owner" });
     } finally {
       setup.store.close();
     }

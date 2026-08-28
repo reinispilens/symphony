@@ -6,8 +6,6 @@ import type { DeliveryOperation } from "../governance/model.js";
 import { isRecord } from "../shared/json.js";
 import type {
   DeliveryGrantSnapshot,
-  ProtectedProofAuthoritySnapshot,
-  ProofCorrelation,
   RequiredCheckObservation,
 } from "../state/model.js";
 
@@ -49,7 +47,6 @@ export interface DeliveryObservation {
   readonly remoteHeadSha: string | null;
   readonly pullRequest: PullRequestObservation | null;
   readonly requiredChecks: readonly RequiredCheckObservation[];
-  readonly proof: readonly ProofCorrelation[];
 }
 
 interface DeliveryRequestAuthority {
@@ -57,7 +54,6 @@ interface DeliveryRequestAuthority {
   readonly controllerGeneration: number;
   readonly repositoryIdentity: string;
   readonly grant: DeliveryGrantSnapshot;
-  readonly proofAuthority: ProtectedProofAuthoritySnapshot;
   readonly tracker: TrackerDeliveryAuthority;
 }
 
@@ -134,21 +130,6 @@ function gitSha(value: unknown, location: string): string {
   return sha;
 }
 
-function digest(value: unknown, location: string): string {
-  const candidate = nonEmptyString(value, location);
-  if (!/^sha256:[0-9a-f]{64}$/u.test(candidate)) {
-    throw new SymphonyError(
-      "delivery_provider_failed",
-      `${location} must be a full lowercase SHA-256 digest`,
-    );
-  }
-  return candidate;
-}
-
-function optionalDigest(value: unknown, location: string): string | null {
-  return value === null ? null : digest(value, location);
-}
-
 function stringOrNumberId(value: unknown, location: string): string | null {
   if (value === null) return null;
   if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
@@ -187,59 +168,6 @@ function parseCheck(value: unknown, index: number): RequiredCheckObservation {
       `${location}.workflowRunId`,
     ),
     status,
-    observedAt: nullableString(value["observedAt"], `${location}.observedAt`),
-  };
-}
-
-function parseProof(value: unknown, index: number): ProofCorrelation {
-  const location = `delivery provider observation.proof[${index}]`;
-  if (!isRecord(value)) {
-    throw new SymphonyError(
-      "delivery_provider_failed",
-      `${location} must be an object`,
-    );
-  }
-  const status = value["status"];
-  if (
-    status !== "pending" &&
-    status !== "passed" &&
-    status !== "failed" &&
-    status !== "setup_refused" &&
-    status !== "non_verdict"
-  ) {
-    throw new SymphonyError(
-      "delivery_provider_failed",
-      `${location}.status is invalid`,
-    );
-  }
-  return {
-    id: nonEmptyString(value["id"], `${location}.id`),
-    checkName: nullableString(value["checkName"], `${location}.checkName`),
-    checkRunId: stringOrNumberId(value["checkRunId"], `${location}.checkRunId`),
-    workflowRunId: stringOrNumberId(
-      value["workflowRunId"],
-      `${location}.workflowRunId`,
-    ),
-    sourceSha: gitSha(value["sourceSha"], `${location}.sourceSha`),
-    planDigest: digest(value["planDigest"], `${location}.planDigest`),
-    adapterDigest: optionalDigest(
-      value["adapterDigest"],
-      `${location}.adapterDigest`,
-    ),
-    policyDigest: optionalDigest(
-      value["policyDigest"],
-      `${location}.policyDigest`,
-    ),
-    resultDigest: optionalDigest(
-      value["resultDigest"],
-      `${location}.resultDigest`,
-    ),
-    evidenceDigest: optionalDigest(
-      value["evidenceDigest"],
-      `${location}.evidenceDigest`,
-    ),
-    status,
-    recordedAt: nonEmptyString(value["recordedAt"], `${location}.recordedAt`),
     observedAt: nullableString(value["observedAt"], `${location}.observedAt`),
   };
 }
@@ -323,12 +251,6 @@ function parseObservation(value: unknown): DeliveryObservation {
       "delivery provider observation.requiredChecks must be an array",
     );
   }
-  if (!Array.isArray(source["proof"])) {
-    throw new SymphonyError(
-      "delivery_provider_failed",
-      "delivery provider observation.proof must be an array",
-    );
-  }
   return {
     remoteHeadSha:
       source["remoteHeadSha"] === null
@@ -339,7 +261,6 @@ function parseObservation(value: unknown): DeliveryObservation {
           ),
     pullRequest,
     requiredChecks: source["requiredChecks"].map(parseCheck),
-    proof: source["proof"].map(parseProof),
   };
 }
 

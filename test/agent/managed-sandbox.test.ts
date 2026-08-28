@@ -147,7 +147,6 @@ describe("managed Codex sandbox", () => {
             governanceManifest: null,
             trackerPolicy: null,
             deliveryGrant: null,
-            proofAuthority: null,
           },
           doctrine: null,
           codexExecutable: path.join(fixture.bin, "codex"),
