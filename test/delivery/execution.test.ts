@@ -11,11 +11,7 @@ import type {
 } from "../../src/state/model.js";
 import { SqliteSymphonyStateStore } from "../../src/state/sqlite-store.js";
 import type { WorkflowSnapshot } from "../../src/workflow/store.js";
-import {
-  acceptedGovernanceFixture,
-  issue,
-  protectedProofAuthorityFixture,
-} from "../support/factories.js";
+import { acceptedGovernanceFixture, issue } from "../support/factories.js";
 
 const START = "2026-08-26T10:00:00.000Z";
 const BASE_SHA = "a".repeat(40);
@@ -45,9 +41,8 @@ function configuration(): AcceptedConfigurationSnapshot {
     deliveryGrant: {
       authority: "owner-gated",
       governingPolicy: governance.trackerPolicy.source,
-      requiredChecks: ["proof / Protected final"],
+      requiredChecks: ["test"],
     },
-    proofAuthority: protectedProofAuthorityFixture(),
   };
 }
 

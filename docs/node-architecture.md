@@ -1,14 +1,15 @@
 # Node Symphony architecture
 
-Status: accepted-governance composition, lane-aware orchestration, and durable managed delivery
-implemented; accepted-publication repin and consumer pilot pending, 2026-08-26
+Status: accepted-governance composition, lane-aware orchestration, and ordinary-check managed
+delivery implemented, 2026-08-28
 
 > [!IMPORTANT]
 > This document describes the managed Node implementation introduced with this change. The
 > [`repository-driver boundary`](repository-driver-boundary.md), durable state store, and pnpm
 > preparation driver, accepted-governance resolver, lane-aware orchestrator, trusted materializer,
 > and durable delivery path are implemented here. Repository-owned hooks remain a transitional
-> compatibility path only. The final accepted publication and a product pilot remain estate gates.
+> compatibility path only. Each deployment supplies its own accepted publication, product profile,
+> and required GitHub checks.
 
 ## The system in one picture
 
@@ -17,7 +18,7 @@ personal .github @ publication SHA
 manifest ──▶ doctrine + tracker policy ───────────────┐
                                                        │
 product profile/context @ SHA       operator binding v3 │
-                                      + pinned WCP workflow
+                                      + delivery provider
                   └────────────────┬────────────────┘
                                    ▼
                          accepted configuration
@@ -28,7 +29,7 @@ GitHub Project ───────────────▶ Orchestrator ─
                                 ├── PreparationDriver ─▶ offline pnpm + read-only seed
                                 ├── Agent Runner ──────▶ systemd scope ─▶ Codex + descendants
                                 ├── Materializer ──────▶ private Git index ─▶ immutable commit
-                                ├── Delivery saga ─────▶ GitHub run truth + exact WCP artifacts
+                                ├── Delivery saga ─────▶ exact-head GitHub checks
                                 └── Tracker Adapter ───▶ live lane and issue facts
 
 One process owns one binding, one repository, and one board; durable fencing prevents a second
@@ -43,8 +44,8 @@ Symphony owns coordination and generic authoring/delivery mechanics: it observes
 work, creates or recovers one durable WorkSession, fences an Attempt, provisions a managed
 worktree, prepares dependencies, runs Codex only in an authoring lane, and reconciles delivery in
 delivery lanes without occupying an agent slot. The WorkSession pins the complete accepted policy
-value and the operator's exact WCP workflow trust anchor, so a later publication or deployment
-repin changes only new sessions. Product resources and proof meaning remain repository-defined. The GitHub Projects adapter owns provider-specific facts such as board
+value, so a later publication or deployment repin changes only new sessions. Product resources,
+tests, and required check names remain repository-defined. The GitHub Projects adapter owns provider-specific facts such as board
 membership and current issue openness; the generic orchestrator interprets live facts through the
 pinned policy and never inspects a GitHub payload.
 
@@ -53,20 +54,20 @@ The Elixir tree is a reference implementation only. The Node implementation is b
 
 ## Architectural boundaries
 
-| Boundary             | Owns                                                                                              | Must not own                                    |
-| -------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| `governance`         | strict accepted-manifest/policy parsing, exact Git blob verification, runtime policy projections  | normative doctrine prose, publication           |
-| `deployment`         | strict product/binding schemas, exact revisions, proof trust anchor, host/root/executable checks  | product proof meaning, workspace effects        |
-| `workflow`           | compatibility YAML loading/reload, typed defaults, strict prompt rendering                        | managed host authority, tracker payloads        |
-| `state`              | WorkSessions, pinned inputs/policy, plans/decisions, attempts, leases, sagas, effects, integrity  | tracker or Git truth, product semantics         |
-| `tracker`            | live issue/lane facts, normalization, provider errors, typed control operations, agent tools      | scheduling, policy publication, workspaces      |
-| `orchestrator`       | policy/fact intersection, authoring/delivery reconciliation, claims, retries, wake-up projections | provider payload inspection, product policy     |
-| `repository`         | workspace port, Git-worktree implementation, ownership checks, guarded cleanup, legacy routing    | dependency install, product proof               |
-| `preparation`        | package input admission, offline pnpm sandbox, private caches/index, policy-bound outcomes        | worktree ownership, product build/proof meaning |
-| `agent`              | Codex framing, managed launch/sandbox/cgroup, quiescence, private temp, scrubbed child env        | tracker/delivery credentials, board policy      |
-| `delivery`           | bounded materialization, durable saga, host-authenticated WCP correlation, guarded cleanup        | product proof semantics, lane publication       |
-| `observability`      | structured logs and snapshots projected from durable/runtime state                                | a second source of orchestration truth          |
-| CLI composition root | select binding or compatibility workflow, open state, bind ports/daemon, own signals              | multi-repository routing or product policy      |
+| Boundary             | Owns                                                                                              | Must not own                                   |
+| -------------------- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `governance`         | strict accepted-manifest/policy parsing, exact Git blob verification, runtime policy projections  | normative doctrine prose, publication          |
+| `deployment`         | strict product/binding schemas, exact revisions, delivery provider, host/root/executable checks   | product test meaning, workspace effects        |
+| `workflow`           | compatibility YAML loading/reload, typed defaults, strict prompt rendering                        | managed host authority, tracker payloads       |
+| `state`              | WorkSessions, pinned inputs/policy, plans/decisions, attempts, leases, sagas, effects, integrity  | tracker or Git truth, product semantics        |
+| `tracker`            | live issue/lane facts, normalization, provider errors, typed control operations, agent tools      | scheduling, policy publication, workspaces     |
+| `orchestrator`       | policy/fact intersection, authoring/delivery reconciliation, claims, retries, wake-up projections | provider payload inspection, product policy    |
+| `repository`         | workspace port, Git-worktree implementation, ownership checks, guarded cleanup, legacy routing    | dependency install, product tests              |
+| `preparation`        | package input admission, offline pnpm sandbox, private caches/index, policy-bound outcomes        | worktree ownership, product build/test meaning |
+| `agent`              | Codex framing, managed launch/sandbox/cgroup, quiescence, private temp, scrubbed child env        | tracker/delivery credentials, board policy     |
+| `delivery`           | bounded materialization, exact-head required checks, durable saga, guarded cleanup                | product test semantics, lane publication       |
+| `observability`      | structured logs and snapshots projected from durable/runtime state                                | a second source of orchestration truth         |
+| CLI composition root | select binding or compatibility workflow, open state, bind ports/daemon, own signals              | multi-repository routing or product policy     |
 
 Dependencies point inward toward small contracts. The composition root binds one state-store,
 tracker, repository-driver, preparation-driver, agent-runner, clock, and logger implementation.
@@ -80,8 +81,8 @@ not move product tests, required-check policy, or domain semantics into the sche
 
 1. For managed Git, resolve `--binding`, verify its accepted-governance manifest and named doctrine
    and tracker-policy blobs, then validate the exact product profile revision/digest and context.
-2. Require the product delivery grant to name the accepted tracker-policy blob exactly and the
-   operator proof authority to name one product-required check plus an immutable WCP workflow.
+2. Require the product delivery grant to name the accepted tracker-policy blob exactly and contain
+   at least one unique, ordered required-check name.
 3. Derive lane/driver/retry values from accepted policy and compose one pinned workflow snapshot.
 4. Validate source/origin/base, exact authoring/delivery/preparation executables, the offline seed
    and policy, and disjoint governance/source/state/workspace/seed roots.
@@ -161,7 +162,7 @@ Codex again.
 
 The SQLite WorkSession store is the authority for accepted
 configuration/doctrine/manifest/policy/proof-authority snapshots, plans and decisions, human attachments, attempts, leases, retries,
-materialization/proof/delivery state, and external-effect intents. A human attachment is a
+materialization/check/delivery state, and external-effect intents. A human attachment is a
 non-removable session-level reference, not an Attempt workspace lease. Tracker and Git/filesystem
 reads remain authoritative for their own external facts and are cross-checked during recovery; they
 never recreate missing Symphony ownership silently. Existing WorkSessions keep their stored policy
@@ -270,7 +271,7 @@ boundaries without external mutation.
 
 - One SQLite-backed WorkSession aggregate for tracker origin, with pinned inputs, plans/decisions,
   session-level human attachment, attempt/runtime leases, durable retry, managed-workspace leases,
-  preparation outcomes, materialization/proof/delivery state, effect intents, transactional v1→v2
+  preparation outcomes, materialization/delivery state, effect intents, transactional v1→v2
   migration, integrity checking, and backup.
 - Cross-process lease exclusion, stale runtime fencing, restart recovery, and an idempotent
   fresh-attempt tracker effect.
@@ -289,42 +290,38 @@ boundaries without external mutation.
   proving a detached descendant is removed after its app-server parent exits.
 - A trusted source materializer that captures one bounded complete manifest, constructs Git objects
   through a private index, and advances only the fenced managed branch from its pinned base.
-- A provider-neutral delivery coordinator whose durable effects bind push, PR, protected exact-head
-  checks/proof, grant-constrained merge, remote branch release, and guarded local cleanup. Provider
+- A provider-neutral delivery coordinator whose durable effects bind push, PR, exact-head required
+  checks, grant-constrained merge, remote branch release, and guarded local cleanup. Provider
   credentials remain in an operator-selected child process and never enter candidate execution or
   WorkSession state.
-- A built-in GitHub provider that authenticates the exact GitHub Actions event, head, caller, and
-  pinned reusable WCP workflow before verifying plan/result artifacts; neither a green check name
-  nor self-consistent candidate artifacts can become protected proof.
+- A built-in GitHub provider that reads each named check from the immutable delivery commit and
+  records its check-run and workflow-run identities when GitHub exposes them.
 - Lane-aware reconciliation that separates authoring from delivery, retains session-pinned policy
   after a deployment repin, abandons an exact prior delivery before Rework, and transitions to Done
   only through a typed tracker effect after cleanup.
 
 Gate: the complete `pnpm check` and `pnpm build` commands after the specification and operator docs
-are synchronized. The accepted publication and a real consumer journey remain external estate
-evidence, not claims made by local fixtures.
+are synchronized. A real deployment journey remains environment evidence, not a claim made by local
+fixtures.
 
-### Next estate gate — accepted publication and real target journey
+### Deployment gate
 
-- Repin the accepted-governance manifest after Spec 001's final golden-principles and tracker-policy
-  bytes land together.
-- Resolve the real Dyslexify profile and external binding v3 against that publication, without
-  changing its harness, then use a disposable board item and managed workspace.
-- Prove terminal cleanup, cancellation, retry, restart recovery, token separation, protected proof,
-  and one complete `Todo → Human Review → Merging → Done` path.
-- Record commands, artifact IDs, and cleanup evidence rather than relying on a green summary.
+- Pin the target's accepted-governance manifest and repository profile.
+- Name the target's ordinary required checks and use a disposable board item and managed workspace.
+- Prove terminal cleanup, cancellation, retry, restart recovery, token separation, and one complete
+  `Todo → Human Review → Merging → Done` path.
+- Record commands, check results, pull request, and cleanup evidence.
 
 ## Target integration prerequisites and scope boundaries
 
 New targets use the Symphony-owned repository driver; they never solve integration by adding a
 repository bootstrap hook. Repository and board facts remain external inputs:
 
-- Dyslexify is the first migration pilot after the final accepted-governance repin. WCP proof v2,
-  capacity-one execution, durable delivery, and accepted-doctrine routing already exist in their
-  owning systems; the pilot must prove their composition.
+- Every target supplies a repository profile, an accepted-governance publication, and ordinary
+  required checks before delivery is enabled.
 - Storefronts and Project Tracker retain the legacy driver until the pilot proves replacement;
   Core and other products require separate onboarding decisions.
-- Required product checks, proof meaning, workpad conventions, lane-vocabulary rules, and board
+- Required product checks, test meaning, workpad conventions, lane-vocabulary rules, and board
   creation live in their owning repositories. Symphony consumes their contracts; it does not absorb
   them.
 - Concurrency remains one until target-repository capacity has been measured and reclaimed.

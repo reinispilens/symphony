@@ -7,7 +7,6 @@ import { describe, expect, it } from "vitest";
 import { SqliteSymphonyStateStore } from "../../src/state/sqlite-store.js";
 import {
   acceptedGovernanceFixture,
-  protectedProofAuthorityFixture,
   withTempDirectory,
 } from "../support/factories.js";
 
@@ -53,7 +52,6 @@ function acceptedConfiguration() {
     governanceManifest: governance.governanceManifest,
     trackerPolicy: governance.trackerPolicy,
     deliveryGrant: null,
-    proofAuthority: null,
   } as const;
 }
 
@@ -66,9 +64,8 @@ function acceptedDeliveryConfiguration(
     deliveryGrant: {
       authority,
       governingPolicy: governance.trackerPolicy.source,
-      requiredChecks: ["proof / Protected final"],
+      requiredChecks: ["test"],
     },
-    proofAuthority: protectedProofAuthorityFixture(),
   } as const;
 }
 
@@ -1181,42 +1178,9 @@ describe("SqliteSymphonyStateStore", () => {
         phase: "checks_pending",
         now: "2026-08-25T10:00:15.000Z",
       });
-      const pendingProof = {
-        id: "proof-42",
-        checkName: "proof / Protected final",
-        checkRunId: "4200",
-        workflowRunId: "420",
-        sourceSha: "d".repeat(40),
-        planDigest: "sha256:plan",
-        adapterDigest: "sha256:adapter",
-        policyDigest: "sha256:proof-policy",
-        resultDigest: null,
-        evidenceDigest: null,
-        status: "pending" as const,
-        recordedAt: "2026-08-25T10:00:16.000Z",
-        observedAt: null,
-      };
-      store.recordProof({
-        sessionId: session.id,
-        controllerGeneration: started.controllerGeneration,
-        proof: pendingProof,
-        now: pendingProof.recordedAt,
-      });
-      store.recordProof({
-        sessionId: session.id,
-        controllerGeneration: started.controllerGeneration,
-        proof: {
-          ...pendingProof,
-          status: "passed",
-          resultDigest: "sha256:result",
-          evidenceDigest: "sha256:evidence",
-          observedAt: "2026-08-25T10:00:17.000Z",
-        },
-        now: "2026-08-25T10:00:17.000Z",
-      });
       const passedChecks = [
         {
-          name: "proof / Protected final",
+          name: "test",
           headSha: "d".repeat(40),
           checkRunId: "4200",
           workflowRunId: "420",
@@ -1273,7 +1237,6 @@ describe("SqliteSymphonyStateStore", () => {
           mergeSha: "e".repeat(40),
           cleanupStatus: "completed",
         },
-        proof: [{ id: "proof-42", status: "passed" }],
       });
 
       store.transitionManagedWorkspace({

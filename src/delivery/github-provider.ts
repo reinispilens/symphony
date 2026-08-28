@@ -1,15 +1,10 @@
-import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import path from "node:path";
-import { crc32, inflateRawSync } from "node:zlib";
 
 import { SymphonyError } from "../errors.js";
 import { DELIVERY_OPERATIONS } from "../governance/model.js";
 import { isRecord } from "../shared/json.js";
-import type {
-  ProofCorrelation,
-  RequiredCheckObservation,
-} from "../state/model.js";
+import type { RequiredCheckObservation } from "../state/model.js";
 import type {
   DeliveryObservation,
   DeliveryProvider,
@@ -19,7 +14,6 @@ import type {
 
 const GITHUB_API_VERSION = "2022-11-28";
 const MAX_HTTP_BYTES = 8 * 1024 * 1024;
-const MAX_ZIP_ENTRY_BYTES = 4 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 1024 * 1024;
 
 export interface GitHubHttpResponse<T> {
@@ -69,24 +63,6 @@ function failure(message: string, cause?: unknown): SymphonyError {
   });
 }
 
-function sha256(bytes: Buffer | string): string {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-}
-
-function stableJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableJsonValue);
-  if (!isRecord(value)) return value;
-  return Object.fromEntries(
-    Object.keys(value)
-      .sort((left, right) => left.localeCompare(right))
-      .map((key) => [key, stableJsonValue(value[key])]),
-  );
-}
-
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(stableJsonValue(value));
-}
-
 function nonEmptyString(value: unknown, location: string): string {
   if (typeof value !== "string" || value.trim() === "") {
     throw failure(`${location} must be a non-empty string`);
@@ -98,14 +74,6 @@ function gitSha(value: unknown, location: string): string {
   const result = nonEmptyString(value, location);
   if (!/^[0-9a-f]{40}$/u.test(result)) {
     throw failure(`${location} must be a full lowercase Git SHA-1`);
-  }
-  return result;
-}
-
-function sha256Value(value: unknown, location: string): string {
-  const result = nonEmptyString(value, location);
-  if (!/^[0-9a-f]{64}$/u.test(result)) {
-    throw failure(`${location} must be a lowercase SHA-256 value`);
   }
   return result;
 }
@@ -159,21 +127,6 @@ function stringList(value: unknown, location: string): readonly string[] {
   return result;
 }
 
-function githubWorkflowPath(value: unknown, location: string): string {
-  const result = nonEmptyString(value, location);
-  if (
-    result.includes("\\") ||
-    path.posix.normalize(result) !== result ||
-    !result.startsWith(".github/workflows/") ||
-    (!result.endsWith(".yml") && !result.endsWith(".yaml"))
-  ) {
-    throw failure(
-      `${location} must identify a normalized GitHub workflow path`,
-    );
-  }
-  return result;
-}
-
 /** Strict request decoder for the separate provider process boundary. */
 export function parseGitHubDeliveryProviderRequest(
   value: unknown,
@@ -207,7 +160,6 @@ export function parseGitHubDeliveryProviderRequest(
     "controllerGeneration",
     "repositoryIdentity",
     "grant",
-    "proofAuthority",
     "tracker",
     "branch",
     "baseRef",
@@ -231,28 +183,6 @@ export function parseGitHubDeliveryProviderRequest(
     grant["governingPolicy"],
     "GitHub delivery request.grant.governingPolicy",
     ["repositoryIdentity", "path", "revision", "digest"],
-  );
-  const proofAuthority = exactObject(
-    source["proofAuthority"],
-    "GitHub delivery request.proofAuthority",
-    [
-      "kind",
-      "requiredCheck",
-      "eventName",
-      "callerWorkflowPath",
-      "controlWorkflow",
-    ],
-  );
-  if (proofAuthority["kind"] !== "github-actions-reusable-workflow-v1") {
-    throw failure("GitHub delivery proof-authority kind is invalid");
-  }
-  if (proofAuthority["eventName"] !== "pull_request_target") {
-    throw failure("GitHub delivery proof-authority event is invalid");
-  }
-  const controlWorkflow = exactObject(
-    proofAuthority["controlWorkflow"],
-    "GitHub delivery request.proofAuthority.controlWorkflow",
-    ["repositoryIdentity", "path", "revision"],
   );
   const tracker = exactObject(
     source["tracker"],
@@ -334,32 +264,6 @@ export function parseGitHubDeliveryProviderRequest(
         grant["requiredChecks"],
         "GitHub delivery requiredChecks",
       ),
-    },
-    proofAuthority: {
-      kind: "github-actions-reusable-workflow-v1" as const,
-      requiredCheck: nonEmptyString(
-        proofAuthority["requiredCheck"],
-        "GitHub delivery proof-authority requiredCheck",
-      ),
-      eventName: "pull_request_target" as const,
-      callerWorkflowPath: githubWorkflowPath(
-        proofAuthority["callerWorkflowPath"],
-        "GitHub delivery proof-authority callerWorkflowPath",
-      ),
-      controlWorkflow: {
-        repositoryIdentity: nonEmptyString(
-          controlWorkflow["repositoryIdentity"],
-          "GitHub delivery proof-authority control repository",
-        ),
-        path: githubWorkflowPath(
-          controlWorkflow["path"],
-          "GitHub delivery proof-authority control workflow path",
-        ),
-        revision: gitSha(
-          controlWorkflow["revision"],
-          "GitHub delivery proof-authority control revision",
-        ),
-      },
     },
     tracker: {
       origin,
@@ -492,15 +396,7 @@ function requiredOperation(
 
 function authorize(request: DeliveryProviderRequest): void {
   repositoryParts(request.repositoryIdentity);
-  repositoryParts(request.proofAuthority.controlWorkflow.repositoryIdentity);
   baseBranch(request.baseRef);
-  if (
-    !request.grant.requiredChecks.includes(request.proofAuthority.requiredCheck)
-  ) {
-    throw refusal(
-      "Protected-proof authority does not identify a product-required check",
-    );
-  }
   if (
     request.tracker.origin === "tracker" &&
     (request.tracker.issueId === null || request.tracker.stateVersion === null)
@@ -805,182 +701,6 @@ export class GitHubGitRefPusher implements GitHubRefPusher {
   }
 }
 
-function zipEntry(archive: Buffer, expectedName: string): Buffer {
-  const minimumEocd = 22;
-  const searchStart = Math.max(0, archive.byteLength - 65_557);
-  let eocd = -1;
-  for (
-    let offset = archive.byteLength - minimumEocd;
-    offset >= searchStart;
-    offset -= 1
-  ) {
-    if (archive.readUInt32LE(offset) === 0x06054b50) {
-      eocd = offset;
-      break;
-    }
-  }
-  if (eocd < 0)
-    throw failure("GitHub proof artifact is not a valid ZIP archive");
-  const disk = archive.readUInt16LE(eocd + 4);
-  const centralDisk = archive.readUInt16LE(eocd + 6);
-  const entriesOnDisk = archive.readUInt16LE(eocd + 8);
-  const entries = archive.readUInt16LE(eocd + 10);
-  const centralSize = archive.readUInt32LE(eocd + 12);
-  const centralOffset = archive.readUInt32LE(eocd + 16);
-  const commentLength = archive.readUInt16LE(eocd + 20);
-  if (
-    disk !== 0 ||
-    centralDisk !== 0 ||
-    entriesOnDisk !== entries ||
-    entries > 100 ||
-    centralOffset + centralSize !== eocd ||
-    eocd + minimumEocd + commentLength !== archive.byteLength ||
-    centralOffset < 0
-  ) {
-    throw failure("GitHub proof artifact ZIP directory is invalid");
-  }
-
-  let offset = centralOffset;
-  const matches: Array<{
-    readonly compressedSize: number;
-    readonly crc: number;
-    readonly flags: number;
-    readonly localOffset: number;
-    readonly method: number;
-    readonly name: string;
-    readonly uncompressedSize: number;
-  }> = [];
-  for (let index = 0; index < entries; index += 1) {
-    if (
-      offset + 46 > archive.byteLength ||
-      archive.readUInt32LE(offset) !== 0x02014b50
-    ) {
-      throw failure("GitHub proof artifact ZIP directory is malformed");
-    }
-    const flags = archive.readUInt16LE(offset + 8);
-    const method = archive.readUInt16LE(offset + 10);
-    const crc = archive.readUInt32LE(offset + 16);
-    const compressedSize = archive.readUInt32LE(offset + 20);
-    const uncompressedSize = archive.readUInt32LE(offset + 24);
-    const nameLength = archive.readUInt16LE(offset + 28);
-    const extraLength = archive.readUInt16LE(offset + 30);
-    const commentLength = archive.readUInt16LE(offset + 32);
-    const localOffset = archive.readUInt32LE(offset + 42);
-    const end = offset + 46 + nameLength + extraLength + commentLength;
-    if (end > archive.byteLength) {
-      throw failure("GitHub proof artifact ZIP entry exceeds its archive");
-    }
-    const name = archive
-      .subarray(offset + 46, offset + 46 + nameLength)
-      .toString("utf8");
-    if (name === expectedName || name.endsWith(`/${expectedName}`)) {
-      matches.push({
-        compressedSize,
-        crc,
-        flags,
-        localOffset,
-        method,
-        name,
-        uncompressedSize,
-      });
-    }
-    offset = end;
-  }
-  if (offset !== centralOffset + centralSize) {
-    throw failure("GitHub proof artifact ZIP directory size is inconsistent");
-  }
-  if (matches.length !== 1) {
-    throw failure(
-      `GitHub proof artifact must contain exactly one ${expectedName}`,
-    );
-  }
-  const match = matches[0]!;
-  if (
-    (match.flags & ~0x0808) !== 0 ||
-    match.uncompressedSize > MAX_ZIP_ENTRY_BYTES ||
-    match.compressedSize > MAX_ZIP_ENTRY_BYTES
-  ) {
-    throw failure(
-      "GitHub proof artifact ZIP entry has unsafe flags or is oversized",
-    );
-  }
-  const local = match.localOffset;
-  if (
-    local + 30 > archive.byteLength ||
-    archive.readUInt32LE(local) !== 0x04034b50
-  ) {
-    throw failure("GitHub proof artifact ZIP local entry is malformed");
-  }
-  const nameLength = archive.readUInt16LE(local + 26);
-  const extraLength = archive.readUInt16LE(local + 28);
-  const localFlags = archive.readUInt16LE(local + 6);
-  const localMethod = archive.readUInt16LE(local + 8);
-  const localCrc = archive.readUInt32LE(local + 14);
-  const localCompressedSize = archive.readUInt32LE(local + 18);
-  const localUncompressedSize = archive.readUInt32LE(local + 22);
-  const localName = archive
-    .subarray(local + 30, local + 30 + nameLength)
-    .toString("utf8");
-  const dataStart = local + 30 + nameLength + extraLength;
-  const dataEnd = dataStart + match.compressedSize;
-  if (
-    dataEnd > centralOffset ||
-    localName !== match.name ||
-    localFlags !== match.flags ||
-    localMethod !== match.method ||
-    ((match.flags & 0x08) === 0 &&
-      (localCrc !== match.crc ||
-        localCompressedSize !== match.compressedSize ||
-        localUncompressedSize !== match.uncompressedSize))
-  ) {
-    throw failure(
-      "GitHub proof artifact ZIP local entry does not match its directory",
-    );
-  }
-  if (dataEnd > archive.byteLength) {
-    throw failure("GitHub proof artifact ZIP data exceeds its archive");
-  }
-  const compressed = archive.subarray(dataStart, dataEnd);
-  let result: Buffer;
-  if (match.method === 0) result = Buffer.from(compressed);
-  else if (match.method === 8) {
-    try {
-      result = inflateRawSync(compressed, {
-        maxOutputLength: MAX_ZIP_ENTRY_BYTES,
-      });
-    } catch (error) {
-      throw failure("GitHub proof artifact could not be decompressed", error);
-    }
-  } else {
-    throw failure(
-      `GitHub proof artifact uses unsupported ZIP method ${match.method}`,
-    );
-  }
-  if (result.byteLength !== match.uncompressedSize) {
-    throw failure(
-      "GitHub proof artifact ZIP size does not match its directory",
-    );
-  }
-  if (crc32(result) !== match.crc) {
-    throw failure("GitHub proof artifact ZIP checksum is invalid");
-  }
-  return result;
-}
-
-function jsonDocument(
-  bytes: Buffer,
-  location: string,
-): Record<string, unknown> {
-  let value: unknown;
-  try {
-    value = JSON.parse(bytes.toString("utf8")) as unknown;
-  } catch (error) {
-    throw failure(`${location} is invalid JSON`, error);
-  }
-  if (!isRecord(value)) throw failure(`${location} must be an object`);
-  return value;
-}
-
 function checkStatus(
   status: unknown,
   conclusion: unknown,
@@ -1141,28 +861,22 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
       );
     }
 
-    const requiredChecks: RequiredCheckObservation[] = [];
-    const proof: ProofCorrelation[] = [];
-    for (const name of request.grant.requiredChecks) {
-      const observed = await this.#requiredCheck(request, name);
-      requiredChecks.push(observed.check);
-      if (observed.proof !== null) proof.push(observed.proof);
-    }
+    const requiredChecks = await Promise.all(
+      request.grant.requiredChecks.map((name) =>
+        this.#requiredCheck(request, name),
+      ),
+    );
     return {
       remoteHeadSha,
       pullRequest: matchingPulls[0] ?? null,
       requiredChecks,
-      proof,
     };
   }
 
   async #requiredCheck(
     request: DeliveryProviderRequest,
     name: string,
-  ): Promise<{
-    readonly check: RequiredCheckObservation;
-    readonly proof: ProofCorrelation | null;
-  }> {
+  ): Promise<RequiredCheckObservation> {
     const repository = repositoryApiPath(request.repositoryIdentity);
     const query = new URLSearchParams({
       check_name: name,
@@ -1182,15 +896,12 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
     );
     if (matches.length === 0) {
       return {
-        check: {
-          name,
-          headSha: request.immutableHeadSha,
-          checkRunId: null,
-          workflowRunId: null,
-          status: "pending",
-          observedAt: null,
-        },
-        proof: null,
+        name,
+        headSha: request.immutableHeadSha,
+        checkRunId: null,
+        workflowRunId: null,
+        status: "pending",
+        observedAt: null,
       };
     }
     if (matches.length !== 1 || !isRecord(matches[0])) {
@@ -1202,244 +913,20 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
     const headSha = gitSha(run["head_sha"], `GitHub check ${name} head SHA`);
     const checkRunId = String(integer(run["id"], `GitHub check ${name} id`));
     const workflowId = workflowRunId(run["details_url"]);
-    let status = checkStatus(run["status"], run["conclusion"]);
-    let admittedProof: ProofCorrelation | null = null;
-    const protectedProof = name === request.proofAuthority.requiredCheck;
-    if (protectedProof) {
-      const app = run["app"];
-      if (!isRecord(app) || app["slug"] !== "github-actions") {
-        throw refusal(
-          "Protected-proof check was not published by GitHub Actions",
-        );
-      }
-    }
-    if (status === "passed" && protectedProof && workflowId === null) {
-      status = "non_verdict";
-    } else if (status === "passed" && protectedProof && workflowId !== null) {
-      admittedProof = await this.#protectedProof(
-        request,
-        name,
-        checkRunId,
-        workflowId,
-        run,
-      );
-      status = admittedProof.status;
-    }
+    const status = checkStatus(run["status"], run["conclusion"]);
     return {
-      check: {
-        name,
-        headSha,
-        checkRunId,
-        workflowRunId: workflowId,
-        status,
-        observedAt:
-          status === "pending"
-            ? null
-            : nonEmptyString(
-                run["completed_at"],
-                `GitHub check ${name} completion time`,
-              ),
-      },
-      proof: admittedProof,
-    };
-  }
-
-  async #protectedProof(
-    request: DeliveryProviderRequest,
-    checkName: string,
-    checkRunId: string,
-    runId: string,
-    checkRun: Record<string, unknown>,
-  ): Promise<ProofCorrelation> {
-    const repository = repositoryApiPath(request.repositoryIdentity);
-    const run = await this.#http.requestJson(
-      "GET",
-      `${repository}/actions/runs/${runId}`,
-    );
-    this.#expectStatus(run.status, [200], "read protected-proof workflow run");
-    if (!isRecord(run.body)) throw failure("GitHub workflow run is malformed");
-    const runRepository = run.body["repository"];
-    const expectedWorkflow = request.proofAuthority.controlWorkflow;
-    const referencedWorkflows = run.body["referenced_workflows"];
-    const expectedReference = `${expectedWorkflow.repositoryIdentity}/${expectedWorkflow.path}@${expectedWorkflow.revision}`;
-    const matchingReferences = Array.isArray(referencedWorkflows)
-      ? referencedWorkflows.filter(
-          (candidate) =>
-            isRecord(candidate) &&
-            candidate["path"] === expectedReference &&
-            candidate["sha"] === expectedWorkflow.revision,
-        )
-      : [];
-    if (
-      String(integer(run.body["id"], "GitHub workflow run id")) !== runId ||
-      !isRecord(runRepository) ||
-      runRepository["full_name"] !== request.repositoryIdentity ||
-      run.body["event"] !== request.proofAuthority.eventName ||
-      run.body["head_sha"] !== request.immutableHeadSha ||
-      run.body["path"] !== request.proofAuthority.callerWorkflowPath ||
-      matchingReferences.length !== 1
-    ) {
-      throw refusal(
-        "Protected-proof workflow run does not match its pinned repository, event, head, caller, and control workflow",
-      );
-    }
-    const attempt = integer(
-      run.body["run_attempt"],
-      "GitHub workflow run attempt",
-    );
-    const artifacts = await this.#http.requestJson(
-      "GET",
-      `${repository}/actions/runs/${runId}/artifacts?per_page=100`,
-    );
-    this.#expectStatus(
-      artifacts.status,
-      [200],
-      "list protected-proof artifacts",
-    );
-    const values = isRecord(artifacts.body)
-      ? artifacts.body["artifacts"]
-      : null;
-    if (!Array.isArray(values)) {
-      throw failure("GitHub protected-proof artifact list is malformed");
-    }
-    const artifact = async (kind: "plan" | "result"): Promise<Buffer> => {
-      const expected = `protected-proof-v2-${kind}-${runId}-${attempt}`;
-      const matches = values.filter(
-        (candidate) =>
-          isRecord(candidate) &&
-          candidate["name"] === expected &&
-          candidate["expired"] === false,
-      );
-      if (matches.length !== 1 || !isRecord(matches[0])) {
-        throw refusal(`Expected one unexpired ${expected} artifact`);
-      }
-      const id = integer(matches[0]["id"], `GitHub ${kind} artifact id`);
-      const downloaded = await this.#http.requestBytes(
-        `${repository}/actions/artifacts/${id}/zip`,
-      );
-      this.#expectStatus(downloaded.status, [200], `download ${kind} artifact`);
-      return zipEntry(downloaded.body, `${kind}.json`);
-    };
-    const [planBytes, resultBytes] = await Promise.all([
-      artifact("plan"),
-      artifact("result"),
-    ]);
-    const plan = jsonDocument(planBytes, "protected proof plan");
-    const result = jsonDocument(resultBytes, "protected proof result");
-    const correlation = plan["correlation"];
-    const source = plan["source"];
-    const head = isRecord(source) ? source["head"] : null;
-    const authority = plan["authority"];
-    if (
-      plan["schemaVersion"] !== 2 ||
-      !isRecord(correlation) ||
-      correlation["repository"] !== request.repositoryIdentity ||
-      correlation["eventName"] !== request.proofAuthority.eventName ||
-      correlation["controlWorkflowRepository"] !==
-        expectedWorkflow.repositoryIdentity ||
-      correlation["controlWorkflowSha"] !== expectedWorkflow.revision ||
-      typeof correlation["callerWorkflowRef"] !== "string" ||
-      !correlation["callerWorkflowRef"].startsWith(
-        `${request.repositoryIdentity}/${request.proofAuthority.callerWorkflowPath}@`,
-      ) ||
-      !isRecord(head) ||
-      head["commit"] !== request.immutableHeadSha ||
-      !isRecord(authority) ||
-      authority["controlSourceRepository"] !==
-        expectedWorkflow.repositoryIdentity ||
-      authority["controlSourceRevision"] !== expectedWorkflow.revision
-    ) {
-      throw refusal("Protected proof plan does not match this delivery head");
-    }
-    if (
-      String(
-        integer(correlation["runId"], "protected proof correlation run id"),
-      ) !== runId ||
-      integer(
-        correlation["runAttempt"],
-        "protected proof correlation run attempt",
-      ) !== attempt
-    ) {
-      throw refusal(
-        "Protected proof plan does not match this workflow run attempt",
-      );
-    }
-    const planDigest = sha256Value(
-      plan["digest"],
-      "protected proof plan digest",
-    );
-    const { digest: _digest, ...planIdentity } = plan;
-    if (sha256(canonicalJson(planIdentity)) !== `sha256:${planDigest}`) {
-      throw refusal("Protected proof plan digest is stale");
-    }
-    if (
-      result["schemaVersion"] !== 2 ||
-      result["repository"] !== request.repositoryIdentity ||
-      result["sourceCommit"] !== request.immutableHeadSha ||
-      result["planDigest"] !== planDigest
-    ) {
-      throw refusal(
-        "Protected proof result does not match its plan and delivery head",
-      );
-    }
-    const status = result["status"];
-    if (
-      status !== "passed" &&
-      status !== "failed" &&
-      status !== "setup_refused" &&
-      status !== "non_verdict"
-    ) {
-      throw failure("Protected proof result status is invalid");
-    }
-    if (status === "passed" && result["cleanup"] !== "complete") {
-      throw refusal("Protected proof cannot pass with incomplete cleanup");
-    }
-    const laneResults = result["laneResults"];
-    if (!Array.isArray(laneResults)) {
-      throw failure("Protected proof result laneResults is malformed");
-    }
-    const evidence = laneResults.map((lane, index) => {
-      if (!isRecord(lane)) {
-        throw failure(`Protected proof lane ${index} is malformed`);
-      }
-      return {
-        laneId: nonEmptyString(
-          lane["laneId"],
-          `Protected proof lane ${index} id`,
-        ),
-        receiptSha256: sha256Value(
-          lane["receiptSha256"],
-          `Protected proof lane ${index} receipt digest`,
-        ),
-      };
-    });
-    const completedAt = nonEmptyString(
-      checkRun["completed_at"],
-      "protected proof completion time",
-    );
-    return {
-      id: `github-actions:${runId}:${checkRunId}`,
-      checkName,
+      name,
+      headSha,
       checkRunId,
-      workflowRunId: runId,
-      sourceSha: request.immutableHeadSha,
-      planDigest: `sha256:${planDigest}`,
-      adapterDigest: `sha256:${sha256Value(
-        authority["controlSourceSha256"],
-        "protected proof control-source digest",
-      )}`,
-      policyDigest: `sha256:${sha256Value(
-        authority["headPolicySha256"],
-        "protected proof policy digest",
-      )}`,
-      resultDigest: sha256(resultBytes),
-      evidenceDigest: sha256(JSON.stringify(evidence)),
+      workflowRunId: workflowId,
       status,
-      recordedAt: nonEmptyString(
-        run.body["created_at"],
-        "protected proof workflow creation time",
-      ),
-      observedAt: completedAt,
+      observedAt:
+        status === "pending"
+          ? null
+          : nonEmptyString(
+              run["completed_at"],
+              `GitHub check ${name} completion time`,
+            ),
     };
   }
 

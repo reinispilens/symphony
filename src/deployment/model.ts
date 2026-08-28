@@ -2,7 +2,6 @@ import type { JsonObject } from "../shared/json.js";
 import type {
   AcceptedConfigurationSnapshot,
   DeliveryGrantSnapshot,
-  ProtectedProofAuthoritySnapshot,
 } from "../state/model.js";
 import type { ResolvedGovernance } from "../governance/model.js";
 import type { ServiceConfig } from "../workflow/config.js";
@@ -34,8 +33,6 @@ export interface DeliveryProviderBinding {
   readonly executable: string;
   readonly timeoutMs: number;
   readonly secretEnvironmentNames: readonly string[];
-  /** Absent in the authored version-2 compatibility schema; normalized to null. */
-  readonly proofAuthority?: ProtectedProofAuthoritySnapshot | null;
 }
 
 export interface LegacyTrackerBinding {

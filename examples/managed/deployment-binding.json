@@ -25,18 +25,7 @@
     "protocolVersion": 1,
     "executable": "/opt/symphony/bin/symphony-github-delivery.mjs",
     "timeoutMs": 30000,
-    "secretEnvironmentNames": ["GH_TOKEN"],
-    "proofAuthority": {
-      "kind": "github-actions-reusable-workflow-v1",
-      "requiredCheck": "proof / Protected proof v2 / final",
-      "eventName": "pull_request_target",
-      "callerWorkflowPath": ".github/workflows/protected-proof-v2.yml",
-      "controlWorkflow": {
-        "repositoryIdentity": "your-owner/workspace-control-plane",
-        "path": ".github/workflows/protected-proof-v2.yml",
-        "revision": "0000000000000000000000000000000000000000"
-      }
-    }
+    "secretEnvironmentNames": ["GH_TOKEN"]
   },
   "tracker": {
     "kind": "github-projects",

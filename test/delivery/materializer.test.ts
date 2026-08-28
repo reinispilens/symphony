@@ -8,7 +8,6 @@ import { TrustedSourceMaterializer } from "../../src/delivery/materializer.js";
 import { SqliteSymphonyStateStore } from "../../src/state/sqlite-store.js";
 import {
   acceptedGovernanceFixture,
-  protectedProofAuthorityFixture,
   withTempDirectory,
 } from "../support/factories.js";
 
@@ -47,9 +46,8 @@ function configuration() {
     deliveryGrant: {
       authority: "owner-gated" as const,
       governingPolicy: governance.trackerPolicy.source,
-      requiredChecks: ["proof / Protected final"],
+      requiredChecks: ["test"],
     },
-    proofAuthority: protectedProofAuthorityFixture(),
   };
 }
 

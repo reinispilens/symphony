@@ -7,10 +7,7 @@ import {
   ExternalDeliveryProvider,
   type DeliveryProviderRequest,
 } from "../../src/delivery/provider.js";
-import {
-  protectedProofAuthorityFixture,
-  withTempDirectory,
-} from "../support/factories.js";
+import { withTempDirectory } from "../support/factories.js";
 
 function request(): DeliveryProviderRequest {
   return {
@@ -28,9 +25,8 @@ function request(): DeliveryProviderRequest {
         revision: "a".repeat(40),
         digest: `sha256:${"b".repeat(64)}`,
       },
-      requiredChecks: ["proof / Protected final"],
+      requiredChecks: ["test"],
     },
-    proofAuthority: protectedProofAuthorityFixture(),
     tracker: {
       origin: "tracker",
       issueId: "issue-1",
@@ -82,26 +78,11 @@ describe("ExternalDeliveryProvider", () => {
           "      remoteHeadSha: head,",
           "      pullRequest: null,",
           "      requiredChecks: [{",
-          '        name: "proof / Protected final",',
+          '        name: "test",',
           "        headSha: head,",
           '        checkRunId: "100",',
           '        workflowRunId: "200",',
           '        status: "passed",',
-          '        observedAt: "2026-08-26T10:01:00.000Z"',
-          "      }],",
-          "      proof: [{",
-          '        id: "proof-100",',
-          '        checkName: "proof / Protected final",',
-          '        checkRunId: "100",',
-          '        workflowRunId: "200",',
-          "        sourceSha: head,",
-          `        planDigest: "sha256:${"1".repeat(64)}",`,
-          `        adapterDigest: "sha256:${"2".repeat(64)}",`,
-          `        policyDigest: "sha256:${"3".repeat(64)}",`,
-          `        resultDigest: "sha256:${"4".repeat(64)}",`,
-          `        evidenceDigest: "sha256:${"5".repeat(64)}",`,
-          '        status: "passed",',
-          '        recordedAt: "2026-08-26T10:00:30.000Z",',
           '        observedAt: "2026-08-26T10:01:00.000Z"',
           "      }]",
           "    }",
@@ -127,12 +108,11 @@ describe("ExternalDeliveryProvider", () => {
         remoteHeadSha: "c".repeat(40),
         requiredChecks: [
           {
-            name: "proof / Protected final",
+            name: "test",
             status: "passed",
             headSha: "c".repeat(40),
           },
         ],
-        proof: [{ id: "proof-100", status: "passed" }],
       });
     });
   });

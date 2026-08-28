@@ -182,7 +182,6 @@ async function fixture(directory: string) {
         governanceManifest: null,
         trackerPolicy: null,
         deliveryGrant: null,
-        proofAuthority: null,
       },
       doctrine: null,
       codexExecutable: process.execPath,

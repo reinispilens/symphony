@@ -162,17 +162,14 @@ function requestBase(
   const delivery = requiredDelivery(session);
   const lease = deliveryLease(session);
   const grant = session.configuration?.deliveryGrant;
-  const proofAuthority = session.configuration?.proofAuthority;
   if (
     grant === null ||
     grant === undefined ||
-    proofAuthority === null ||
-    proofAuthority === undefined ||
     delivery.branch === null ||
     delivery.immutableHeadSha === null
   ) {
     throw deliveryRefused(
-      "Delivery has no pinned product-owner grant, operator proof authority, or immutable head",
+      "Delivery has no pinned product-owner grant or immutable head",
     );
   }
   return {
@@ -182,7 +179,6 @@ function requestBase(
     controllerGeneration: session.controller.generation,
     repositoryIdentity: session.repositoryIdentity,
     grant,
-    proofAuthority,
     tracker,
     branch: delivery.branch,
     baseRef: lease.baseRef,
@@ -428,14 +424,12 @@ export class DeliveryCoordinator {
           }
           exactRemoteHead(session, observation, pullRequest.state === "merged");
           const checks = this.#requiredChecks(session, observation);
-          this.#recordAdmittedProof(session, observation);
           if (pullRequest.state === "merged") {
             if (checks.some((check) => check.status !== "passed")) {
               throw deliveryRefused(
                 "The exact pull request merged without every accepted required check passing",
               );
             }
-            this.#requirePassedProof(session, observation, checks);
             session = this.#transition(session, ["checks_pending"], {
               phase: "merged",
               requiredChecks: checks,
@@ -453,7 +447,6 @@ export class DeliveryCoordinator {
           if (checks.some((check) => check.status !== "passed")) {
             return { status: "product_failed", session };
           }
-          this.#requirePassedProof(session, observation, checks);
           session = this.#transition(session, ["checks_pending"], {
             phase: "review_pending",
             requiredChecks: checks,
@@ -903,55 +896,6 @@ export class DeliveryCoordinator {
       return check;
     });
     return checks;
-  }
-
-  #recordAdmittedProof(
-    session: WorkSessionSnapshot,
-    observation: DeliveryObservation,
-  ): void {
-    const accepted = session.configuration?.deliveryGrant?.requiredChecks;
-    if (accepted === undefined) {
-      throw deliveryRefused("Delivery proof authority is missing");
-    }
-    for (const proof of observation.proof) {
-      if (proof.checkName !== null && accepted.includes(proof.checkName)) {
-        this.#stateStore.recordProof({
-          sessionId: session.id,
-          controllerGeneration: session.controller.generation,
-          proof,
-          now: this.#timestamp(),
-        });
-      }
-    }
-  }
-
-  #requirePassedProof(
-    session: WorkSessionSnapshot,
-    observation: DeliveryObservation,
-    checks: DeliveryState["requiredChecks"],
-  ): void {
-    const head = requiredDelivery(session).immutableHeadSha;
-    if (head === null) throw deliveryRefused("Delivery proof head is missing");
-    const admitted = observation.proof.filter((proof) => {
-      const check = checks.find(
-        (candidate) => candidate.name === proof.checkName,
-      );
-      return (
-        check !== undefined &&
-        check.checkRunId !== null &&
-        check.workflowRunId !== null &&
-        proof.checkRunId !== null &&
-        proof.workflowRunId !== null &&
-        proof.sourceSha === head &&
-        proof.checkRunId === check.checkRunId &&
-        proof.workflowRunId === check.workflowRunId
-      );
-    });
-    if (admitted.length !== 1 || admitted[0]?.status !== "passed") {
-      throw deliveryRefused(
-        "Passed required checks must include exactly one exact-head passed protected-proof correlation",
-      );
-    }
   }
 
   #pullRequestBody(session: WorkSessionSnapshot): string {

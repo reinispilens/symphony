@@ -29,7 +29,6 @@ import {
   type FinishPreparationInput,
   type ManagedWorkspaceLease,
   type RecordWorkspaceInput,
-  type RecordProofInput,
   type ReplacePlanInput,
   type RenewRuntimeLeaseInput,
   type RetryIntent,
@@ -271,38 +270,7 @@ function migrateV1WorkSessionDocument(source: string): WorkSessionDocument {
     };
   });
 
-  const proofValue = decoded["proof"];
-  if (!Array.isArray(proofValue)) {
-    throw new StateStoreError(
-      "state_corrupt",
-      "Cannot migrate v1 WorkSession without a proof array",
-    );
-  }
   const recordedAt = migrationString(decoded["updatedAt"], "updatedAt");
-  const proof = proofValue.map((value, index) => {
-    if (!isRecord(value)) {
-      throw new StateStoreError(
-        "state_corrupt",
-        `Cannot migrate v1 WorkSession proof ${index}: not an object`,
-      );
-    }
-    return {
-      id: migrationString(value["requestId"], `proof[${index}].requestId`),
-      checkName: null,
-      checkRunId: null,
-      workflowRunId: null,
-      sourceSha: value["sourceSha"],
-      planDigest: value["planDigest"],
-      adapterDigest: null,
-      policyDigest: null,
-      resultDigest: null,
-      evidenceDigest: null,
-      status: value["status"],
-      recordedAt,
-      observedAt: value["status"] === "pending" ? null : recordedAt,
-    };
-  });
-
   const legacyDelivery = decoded["delivery"];
   let delivery: Record<string, unknown> | null = null;
   if (legacyDelivery !== null) {
@@ -344,7 +312,6 @@ function migrateV1WorkSessionDocument(source: string): WorkSessionDocument {
       humanAttachment,
       attempts,
       materializations: [],
-      proof,
       deliveryHistory: [],
       delivery,
     }),
@@ -807,7 +774,6 @@ export class SqliteSymphonyStateStore implements SymphonyStateStore {
         attempts: [],
         retry: null,
         materializations: [],
-        proof: [],
         deliveryHistory: [],
         delivery: null,
         createdAt: input.now,
@@ -848,7 +814,6 @@ export class SqliteSymphonyStateStore implements SymphonyStateStore {
         attempts: [],
         retry: null,
         materializations: [],
-        proof: [],
         deliveryHistory: [],
         delivery: null,
         createdAt: input.now,
@@ -2064,71 +2029,6 @@ export class SqliteSymphonyStateStore implements SymphonyStateStore {
         updatedAt: input.now,
       };
       return { ...document, delivery, updatedAt: input.now };
-    });
-  }
-
-  recordProof(input: RecordProofInput): WorkSessionSnapshot {
-    timestamp(input.now, "proof observation time");
-    return this.#mutate(input.sessionId, (document) => {
-      assertControllerGeneration(
-        document,
-        input.controllerGeneration,
-        "record proof for",
-      );
-      const head = document.delivery?.immutableHeadSha;
-      const grant = document.configuration?.deliveryGrant;
-      if (
-        head === null ||
-        head === undefined ||
-        input.proof.sourceSha !== head ||
-        input.proof.checkName === null ||
-        grant === null ||
-        grant === undefined ||
-        !grant.requiredChecks.includes(input.proof.checkName)
-      ) {
-        throw new StateStoreError(
-          "input_conflict",
-          "Proof observation is not bound to this delivery head and accepted required-check grant",
-        );
-      }
-      const index = document.proof.findIndex(
-        (candidate) => candidate.id === input.proof.id,
-      );
-      if (index >= 0) {
-        const current = document.proof[index]!;
-        const immutable = (proof: typeof current) => ({
-          id: proof.id,
-          checkName: proof.checkName,
-          checkRunId: proof.checkRunId,
-          workflowRunId: proof.workflowRunId,
-          sourceSha: proof.sourceSha,
-          planDigest: proof.planDigest,
-          adapterDigest: proof.adapterDigest,
-          policyDigest: proof.policyDigest,
-          recordedAt: proof.recordedAt,
-        });
-        if (!sameJson(immutable(current), immutable(input.proof))) {
-          throw new StateStoreError(
-            "input_conflict",
-            `Proof ${input.proof.id} already binds different immutable evidence`,
-          );
-        }
-        if (sameJson(current, input.proof)) return document;
-        if (current.status !== "pending") {
-          throw new StateStoreError(
-            "stale_fence",
-            `Proof ${input.proof.id} is already terminal`,
-          );
-        }
-        const proof = [...document.proof];
-        proof[index] = input.proof;
-        return { ...document, proof, updatedAt: input.now };
-      }
-      return {
-        ...document,
-        proof: [...document.proof, input.proof],
-        updatedAt: input.now,
-      };
     });
   }
 

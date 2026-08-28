@@ -21,22 +21,6 @@ export const testTrackerProfiles: TrackerConfigProfiles = new Map([
   [testTrackerProfile.kind, testTrackerProfile],
 ]);
 
-export function protectedProofAuthorityFixture(
-  requiredCheck = "proof / Protected final",
-) {
-  return {
-    kind: "github-actions-reusable-workflow-v1" as const,
-    requiredCheck,
-    eventName: "pull_request_target" as const,
-    callerWorkflowPath: ".github/workflows/protected-proof-v2.yml",
-    controlWorkflow: {
-      repositoryIdentity: "reinispilens/workspace-control-plane",
-      path: ".github/workflows/protected-proof-v2.yml",
-      revision: "c".repeat(40),
-    },
-  };
-}
-
 export function acceptedGovernanceFixture() {
   const revision = "b".repeat(40);
   const repositoryIdentity = "reinispilens/.github";
