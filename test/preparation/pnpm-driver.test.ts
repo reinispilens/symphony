@@ -579,7 +579,7 @@ fs.writeFileSync("preparation-observation.json", JSON.stringify({ argv: process.
           PATH: process.env["PATH"],
           LANG: "C.UTF-8",
           GH_TOKEN: "tracker-secret",
-          WCP_CONTROL_TOKEN: "control-secret",
+          LEGACY_CONTROL_TOKEN: "control-secret",
           SSH_AUTH_SOCK: "/private/agent.sock",
         },
         now: () => new Date(START_MS + 10),
@@ -606,7 +606,7 @@ fs.writeFileSync("preparation-observation.json", JSON.stringify({ argv: process.
         expect(observation.argv).toContain("--offline");
         expect(observation.argv).toContain("--ignore-pnpmfile");
         expect(observation.env["GH_TOKEN"]).toBeUndefined();
-        expect(observation.env["WCP_CONTROL_TOKEN"]).toBeUndefined();
+        expect(observation.env["LEGACY_CONTROL_TOKEN"]).toBeUndefined();
         expect(observation.env["SSH_AUTH_SOCK"]).toBeUndefined();
         expect(observation.env["HOME"]).toBe("/cache/home");
         expect(observation.env["npm_config_ignore_scripts"]).toBe("true");
