@@ -349,15 +349,17 @@ async function sandboxInvocation(
     program: ResolvedProgram,
     target: string,
   ): string => {
+    if (program.bindRoot !== null) {
+      return program.invocationPath;
+    }
     if (
-      program.bindRoot !== null ||
-      standardRoots.some(
+      [...standardRoots, ...uniqueToolRoots].some(
         (root) =>
           program.realPath === root ||
           program.realPath.startsWith(`${root}${path.sep}`),
       )
     ) {
-      return program.invocationPath;
+      return program.realPath;
     }
     args.push("--dir", "/tool", "--ro-bind", program.realPath, target);
     return target;
