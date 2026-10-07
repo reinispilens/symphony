@@ -74,7 +74,7 @@ One WorkSession binds one repository identity and one accepted Symphony deployme
 cross-repository program such as the estate migration remains a coordinating plan plus separate
 repository-owned changes; the MVP does not invent an atomic multi-repository session manager.
 
-`SPEC.md` gains a manual-control extension together with implementation. `.github` doctrine is
+`SPEC.md` gains a manual-control extension together with implementation. HCP doctrine is
 rescoped so board status remains the only start authority for tracker-linked work, while an explicit
 local user command may start boardless interactive work.
 
@@ -254,8 +254,8 @@ and the latest steering decisions. `--json` exposes a versioned projection, neve
 Technical gate:
 
 1. The foundation WorkSession model and store are live for tracker origin.
-2. `.github` doctrine explicitly scopes board start authority to tracker-linked work.
-3. The accepted golden-principles reference can be pinned for a new WorkSession.
+2. HCP doctrine explicitly scopes board start authority to tracker-linked work.
+3. The accepted doctrine reference can be pinned for a new WorkSession.
 4. An explicit operator-binding file can resolve one accepted product profile and context snapshot
    without reading authority from the attached/candidate checkout.
 
@@ -337,7 +337,7 @@ Pilot the exact workflow that motivated the feature:
 ## Later controller-handoff extension
 
 Handoff is intentionally absent from the MVP. When a real need schedules it, the board transition
-must respect current `.github` doctrine:
+must respect current HCP doctrine:
 
 ```text
 stop runtime

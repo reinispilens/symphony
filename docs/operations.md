@@ -10,7 +10,7 @@
 ## Deployment map
 
 ```text
-personal .github @ publication SHA
+harness-control-plane @ publication SHA
 accepted manifest ─▶ doctrine + tracker policy ─────┐
                                                      │
 product A @ accepted Git SHA       operator binding v3 │
@@ -34,7 +34,7 @@ one service instance = one repository = one workspace root = one Project
 
 Symphony is a daemon, not a command that should be launched once per issue. A supervisor keeps one
 instance alive for each repository. For managed Git, an operator-owned binding is the deployment
-contract. Version 3 pins one accepted `.github` publication plus one product profile/context
+contract. Version 3 pins one accepted governance publication plus one product profile/context
 revision and supplies the Project, host roots, capacity, runtime, delivery credentials,
 process-containment authority, and—when pnpm is selected—the exact preparation toolchain plus
 offline dependency policy. Running several
@@ -68,8 +68,9 @@ authority. Known tracker-secret values are redacted if `gh` or a hook echoes the
 error, but that safeguard does not make untrusted hooks safe.
 
 For a managed deployment, commit the thin product profile and prompt/context. Prepare a trusted
-checkout of the personal/organization `.github` repository outside product, state, and workspace
-roots; fetch both the manifest publication commit and the manifest's accepted artifact revision.
+checkout of the governance repository (in this estate, `reinispilens/harness-control-plane`, which
+publishes `policy/tracker/accepted-governance.json`) outside product, state, and workspace roots. The
+governance repository may be any repository except the product itself; fetch both the manifest publication commit and the manifest's accepted artifact revision.
 Create the separate version-3 binding from
 [`../examples/managed/deployment-binding.json`](../examples/managed/deployment-binding.json). Replace
 its placeholders with the exact profile and manifest revisions plus the SHA-256 digests of their Git
