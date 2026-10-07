@@ -1073,10 +1073,13 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
         [governanceManifest, "governanceManifest"],
         [trackerPolicy.source, "trackerPolicy.source"],
       ] as const) {
-        if (!content.repositoryIdentity.toLowerCase().endsWith("/.github")) {
+        if (
+          content.repositoryIdentity.toLowerCase() ===
+          document.repositoryIdentity.toLowerCase()
+        ) {
           corrupt(
             `document.configuration.${location}.repositoryIdentity`,
-            "must identify an owner or organization .github repository",
+            "must not be the WorkSession repository",
           );
         }
         assertRepositoryRelativePath(
@@ -1120,10 +1123,13 @@ function assertDocumentInvariants(document: WorkSessionDocument): void {
     }
     if (deliveryGrant !== null) {
       const policy = deliveryGrant.governingPolicy;
-      if (!policy.repositoryIdentity.toLowerCase().endsWith("/.github")) {
+      if (
+        policy.repositoryIdentity.toLowerCase() ===
+        document.repositoryIdentity.toLowerCase()
+      ) {
         corrupt(
           "document.configuration.deliveryGrant.governingPolicy.repositoryIdentity",
-          "must identify an owner or organization .github repository",
+          "must not be the WorkSession repository",
         );
       }
       assertRepositoryRelativePath(

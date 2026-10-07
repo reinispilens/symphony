@@ -235,13 +235,6 @@ export function parseAcceptedGovernanceManifest(
     "accepted governance manifest.repositoryIdentity",
     "manifest",
   );
-  if (!identity.toLowerCase().endsWith("/.github")) {
-    invalid(
-      "manifest",
-      "accepted governance manifest.repositoryIdentity",
-      "must identify an owner or organization .github repository",
-    );
-  }
   return {
     schemaVersion: ACCEPTED_GOVERNANCE_SCHEMA_VERSION,
     repositoryIdentity: identity,
