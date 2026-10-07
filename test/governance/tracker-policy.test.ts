@@ -100,4 +100,26 @@ describe("accepted governance contracts", () => {
       expect.objectContaining({ code: "governance_manifest_invalid" }),
     );
   });
+
+  it("accepts a publication manifest from a repository not named .github", () => {
+    const governance = acceptedGovernanceFixture();
+    const manifest = {
+      schemaVersion: 1,
+      repositoryIdentity: "reinispilens/harness-control-plane",
+      acceptedRevision: governance.doctrine.revision,
+      artifacts: {
+        doctrine: {
+          path: "agents/AGREEMENT.md",
+          digest: governance.doctrine.digest,
+        },
+        trackerPolicy: {
+          path: "policy/tracker/tracker-policy.json",
+          digest: governance.trackerPolicy.source.digest,
+        },
+      },
+    };
+    expect(
+      parseAcceptedGovernanceManifest(Buffer.from(JSON.stringify(manifest))),
+    ).toEqual(manifest);
+  });
 });

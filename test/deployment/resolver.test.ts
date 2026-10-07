@@ -231,6 +231,7 @@ async function selectPreparationClass(
 async function selectDeliveryGrant(
   setup: Fixture,
   authority: "owner-gated" | "full-in-scope" = "owner-gated",
+  governingIdentity = "acme/.github",
 ): Promise<DeploymentBindingDocument> {
   const profileFile = path.join(setup.sourceRoot, setup.profilePath);
   const profile = JSON.parse(await readFile(profileFile, "utf8")) as Record<
@@ -241,7 +242,7 @@ async function selectDeliveryGrant(
   profile["deliveryGrant"] = {
     authority,
     governingPolicy: {
-      repositoryIdentity: "acme/.github",
+      repositoryIdentity: governingIdentity,
       path: "agent-system/delivery-policy.json",
       revision: "2".repeat(40),
       digest: `sha256:${"3".repeat(64)}`,
@@ -305,7 +306,10 @@ interface V3Fixture {
   };
 }
 
-async function selectAcceptedGovernance(setup: Fixture): Promise<V3Fixture> {
+async function selectAcceptedGovernance(
+  setup: Fixture,
+  governanceIdentity = "reinispilens/.github",
+): Promise<V3Fixture> {
   const root = path.dirname(setup.sourceRoot);
   const governanceRoot = path.join(root, "governance");
   await mkdir(path.join(governanceRoot, "agent-system"), { recursive: true });
@@ -324,7 +328,7 @@ async function selectAcceptedGovernance(setup: Fixture): Promise<V3Fixture> {
     "remote",
     "add",
     "origin",
-    "https://github.com/reinispilens/.github.git",
+    `https://github.com/${governanceIdentity}.git`,
   ]);
 
   const policyPath = "agent-system/tracker-policy.json";
@@ -357,7 +361,7 @@ async function selectAcceptedGovernance(setup: Fixture): Promise<V3Fixture> {
   ]);
   const manifest = {
     schemaVersion: 1,
-    repositoryIdentity: "reinispilens/.github",
+    repositoryIdentity: governanceIdentity,
     acceptedRevision,
     artifacts: {
       doctrine: { path: doctrinePath, digest: digest(doctrineBytes) },
@@ -390,7 +394,7 @@ async function selectAcceptedGovernance(setup: Fixture): Promise<V3Fixture> {
   profile["deliveryGrant"] = {
     authority: "full-in-scope",
     governingPolicy: {
-      repositoryIdentity: "reinispilens/.github",
+      repositoryIdentity: governanceIdentity,
       path: policyPath,
       revision: acceptedRevision,
       digest: digest(policyBytes),
@@ -432,7 +436,7 @@ async function selectAcceptedGovernance(setup: Fixture): Promise<V3Fixture> {
       digest: digest(profileBytes),
     },
     governance: {
-      repositoryIdentity: "reinispilens/.github",
+      repositoryIdentity: governanceIdentity,
       sourceRoot: governanceRoot,
       manifest: {
         path: manifestPath,
@@ -509,6 +513,82 @@ describe("deployment binding resolver", () => {
           owner: "acme",
           repo: "widgets",
         },
+      });
+    });
+  });
+
+  it("resolves v3 governance from an operator-chosen repository not named .github", async () => {
+    await withTempDirectory(async (directory) => {
+      const setup = await fixture(directory);
+      const accepted = await selectAcceptedGovernance(
+        setup,
+        "reinispilens/harness-control-plane",
+      );
+
+      const resolved = await resolveDeploymentBinding({
+        bindingPath: setup.bindingPath,
+        trackerProfiles: testTrackerProfiles,
+        environment: { DELIVERY_TOKEN: "operator-secret" },
+      });
+
+      expect(resolved.acceptedConfiguration.trackerPolicy?.source).toEqual({
+        repositoryIdentity: "reinispilens/harness-control-plane",
+        ...accepted.policy,
+      });
+      expect(resolved.governance?.manifestReference.repositoryIdentity).toBe(
+        "reinispilens/harness-control-plane",
+      );
+    });
+  });
+
+  it("refuses governance pinned from the product repository itself", async () => {
+    await withTempDirectory(async (directory) => {
+      const setup = await fixture(directory);
+      const accepted = await selectAcceptedGovernance(setup);
+      await writeFile(
+        setup.bindingPath,
+        `${JSON.stringify(
+          {
+            ...accepted.binding,
+            governance: {
+              ...accepted.binding.governance,
+              repositoryIdentity: "ACME/Widgets",
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      await expect(
+        resolveDeploymentBinding({
+          bindingPath: setup.bindingPath,
+          trackerProfiles: testTrackerProfiles,
+          environment: { DELIVERY_TOKEN: "operator-secret" },
+        }),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining(
+          "binding.governance.repositoryIdentity must not be the product repository",
+        ),
+      });
+    });
+  });
+
+  it("refuses a product delivery grant governed by the product repository itself", async () => {
+    await withTempDirectory(async (directory) => {
+      const setup = await fixture(directory);
+      await selectDeliveryGrant(setup, "owner-gated", "acme/widgets");
+
+      await expect(
+        resolveDeploymentBinding({
+          bindingPath: setup.bindingPath,
+          trackerProfiles: testTrackerProfiles,
+          environment: { DELIVERY_TOKEN: "operator-secret" },
+        }),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining(
+          "governingPolicy.repositoryIdentity must not be the product repository",
+        ),
       });
     });
   });

@@ -12,7 +12,7 @@ from the bundled Elixir reference.
 ## The system at a glance
 
 ```text
-personal .github @ accepted publication
+harness-control-plane @ accepted publication
 doctrine + tracker policy ───────────────┐
                                         │
 product repository              Symphony operator
@@ -91,8 +91,8 @@ The product repository commits a thin `.symphony/repository-profile.json` and it
   "deliveryGrant": {
     "authority": "owner-gated",
     "governingPolicy": {
-      "repositoryIdentity": "your-owner/.github",
-      "path": "agent-system/tracker-policy.json",
+      "repositoryIdentity": "reinispilens/harness-control-plane",
+      "path": "policy/tracker/tracker-policy.json",
       "revision": "0000000000000000000000000000000000000000",
       "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     },

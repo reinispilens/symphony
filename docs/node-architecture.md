@@ -14,7 +14,7 @@ delivery implemented, 2026-08-28
 ## The system in one picture
 
 ```text
-personal .github @ publication SHA
+harness-control-plane @ publication SHA
 manifest ──▶ doctrine + tracker policy ───────────────┐
                                                        │
 product profile/context @ SHA       operator binding v3 │

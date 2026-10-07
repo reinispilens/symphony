@@ -219,4 +219,51 @@ describe("WorkSession document v2", () => {
       parseWorkSessionDocument(JSON.stringify(document)),
     ).toThrowError(expect.objectContaining({ code: "state_corrupt" }));
   });
+
+  it("refuses accepted governance pinned from the WorkSession repository itself", () => {
+    const document = JSON.parse(
+      JSON.stringify(completeDocument()),
+    ) as WorkSessionDocument;
+    (
+      document.configuration?.governanceManifest as {
+        repositoryIdentity: string;
+      }
+    ).repositoryIdentity = "ACME/Widgets";
+    expect(() =>
+      parseWorkSessionDocument(JSON.stringify(document)),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "state_corrupt",
+        message: expect.stringContaining(
+          "governanceManifest.repositoryIdentity must not be the WorkSession repository",
+        ),
+      }),
+    );
+  });
+
+  it("refuses a delivery grant governed by the WorkSession repository itself", () => {
+    const document = JSON.parse(
+      JSON.stringify(completeDocument()),
+    ) as WorkSessionDocument;
+    (
+      document.configuration as unknown as { deliveryGrant: unknown }
+    ).deliveryGrant = {
+      authority: "owner-gated",
+      governingPolicy: {
+        ...GOVERNANCE.trackerPolicy.source,
+        repositoryIdentity: "acme/widgets",
+      },
+      requiredChecks: ["test"],
+    };
+    expect(() =>
+      parseWorkSessionDocument(JSON.stringify(document)),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "state_corrupt",
+        message: expect.stringContaining(
+          "governingPolicy.repositoryIdentity must not be the WorkSession repository",
+        ),
+      }),
+    );
+  });
 });

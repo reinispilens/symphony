@@ -13,10 +13,10 @@
   "branchPrefix": "symphony/",
   "gitExecutable": "/usr/bin/git",
   "governance": {
-    "repositoryIdentity": "your-owner/.github",
-    "sourceRoot": "/srv/repositories/.github",
+    "repositoryIdentity": "reinispilens/harness-control-plane",
+    "sourceRoot": "/srv/repositories/harness-control-plane",
     "manifest": {
-      "path": "agent-system/accepted-governance.json",
+      "path": "policy/tracker/accepted-governance.json",
       "revision": "0000000000000000000000000000000000000000",
       "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     }

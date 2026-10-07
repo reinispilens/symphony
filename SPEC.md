@@ -446,8 +446,8 @@ Managed configuration composes three independently validated authorities:
 1. A product-owned repository profile, read from the exact Git commit selected by the binding.
 2. An operator-owned deployment binding stored outside product source, Symphony state, and managed
    workspace roots.
-3. An accepted governance publication in an owner or organization `.github` repository, selected by
-   the binding at one exact manifest commit and digest. The manifest identifies one accepted
+3. An accepted governance publication in an operator-chosen governance repository that is not the
+   product repository, selected by the binding at one exact manifest commit and digest. The manifest identifies one accepted
    doctrine blob and one accepted tracker-policy blob at an exact ancestor commit and digest.
 
 The version-1 compatibility repository profile is a strict JSON object with:
@@ -460,7 +460,8 @@ The version-1 compatibility repository profile is a strict JSON object with:
 - `preparationClass`: `none` or `pnpm`
 
 Version 2 adds one required `deliveryGrant`: `authority` is `owner-gated` or `full-in-scope`,
-`governingPolicy` is one portable `.github` repository/path/exact-revision/digest reference, and
+`governingPolicy` is one portable governance repository/path/exact-revision/digest reference whose
+repository MUST NOT be the product repository, and
 `requiredChecks` is a non-empty sorted unique list. The profile still MUST NOT contain tracker
 configuration, credentials, source/state/workspace paths, branch namespace, concurrency, runtime
 executables/timeouts, process containment, or test/delivery commands.
@@ -490,8 +491,8 @@ credential value enters a WorkSession or provider request.
 
 Version 3 adds one required `governance` authority and replaces copied global tracker policy with a
 thin tracker binding.
-`governance` contains the `.github` repository identity, an absolute trusted checkout root, and a
-manifest path/full commit/digest. The thin tracker contains only `kind` plus provider-owned routing
+`governance` contains the governance repository identity, which MUST differ from the product-profile
+repository identity, an absolute trusted checkout root, and a manifest path/full commit/digest. The thin tracker contains only `kind` plus provider-owned routing
 coordinates. Required/excluded driver labels, active/terminal/fresh-Attempt states, and the
 fresh-Attempt failure state MUST be derived from the accepted tracker-policy blob; they MUST NOT be
 repeated in version 3.
@@ -502,7 +503,7 @@ target list MUST NOT widen or replace that authority. Terminal lifecycle transit
 delivery-complete → `Done` remain available only through the typed tracker control.
 
 The accepted-governance manifest is a strict portable JSON document containing its schema version,
-`.github` repository identity, `acceptedRevision`, and distinct doctrine/tracker-policy artifact
+governance repository identity, `acceptedRevision`, and distinct doctrine/tracker-policy artifact
 paths and digests. The tracker policy is also strict and contains one stable policy ID, exactly the
 `direct` and `symphony` driver selectors, unique lane records, the `owner-gated` and `full-in-scope`
 delivery profiles, and supported continuation/failure/Rework semantics plus an explicit

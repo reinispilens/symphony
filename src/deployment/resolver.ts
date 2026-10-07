@@ -407,6 +407,11 @@ function parseRepositoryProfile(bytes: Buffer): RepositoryProfileDocument {
       "must be 'none' or 'pnpm'",
     );
   }
+  const productIdentity = repositoryIdentity(
+    source["repositoryIdentity"],
+    "repository profile.repositoryIdentity",
+    "profile",
+  );
   let deliveryGrant: RepositoryProfileDocument["deliveryGrant"] = null;
   if (schemaVersion === REPOSITORY_PROFILE_SCHEMA_VERSION) {
     const grant = strictObject(
@@ -434,11 +439,11 @@ function parseRepositoryProfile(bytes: Buffer): RepositoryProfileDocument {
       "repository profile.deliveryGrant.governingPolicy.repositoryIdentity",
       "profile",
     );
-    if (!policyIdentity.toLowerCase().endsWith("/.github")) {
+    if (policyIdentity.toLowerCase() === productIdentity.toLowerCase()) {
       invalid(
         "profile",
         "repository profile.deliveryGrant.governingPolicy.repositoryIdentity",
-        "must identify an owner or organization .github repository",
+        "must not be the product repository",
       );
     }
     const policyRevision = nonEmptyString(
@@ -496,11 +501,7 @@ function parseRepositoryProfile(bytes: Buffer): RepositoryProfileDocument {
   }
   return {
     schemaVersion,
-    repositoryIdentity: repositoryIdentity(
-      source["repositoryIdentity"],
-      "repository profile.repositoryIdentity",
-      "profile",
-    ),
+    repositoryIdentity: productIdentity,
     baseRef,
     authoringContext: { promptPath, paths },
     preparationClass,
@@ -598,7 +599,10 @@ function parseThinTracker(
   };
 }
 
-function parseGovernance(value: unknown): GovernanceBinding {
+function parseGovernance(
+  value: unknown,
+  productIdentity: string,
+): GovernanceBinding {
   const source = strictObject(
     value,
     "binding.governance",
@@ -616,11 +620,11 @@ function parseGovernance(value: unknown): GovernanceBinding {
     "binding.governance.repositoryIdentity",
     "binding",
   );
-  if (!identity.toLowerCase().endsWith("/.github")) {
+  if (identity.toLowerCase() === productIdentity.toLowerCase()) {
     invalid(
       "binding",
       "binding.governance.repositoryIdentity",
-      "must identify an owner or organization .github repository",
+      "must not be the product repository",
     );
   }
   const revision = nonEmptyString(
@@ -867,15 +871,16 @@ function parseDeploymentBinding(bytes: Buffer): DeploymentBindingDocument {
       "must be sorted",
     );
   }
+  const productIdentity = repositoryIdentity(
+    profile["repositoryIdentity"],
+    "binding.productProfile.repositoryIdentity",
+    "binding",
+  );
   return {
     schemaVersion,
     id: nonEmptyString(source["id"], "binding.id", "binding"),
     productProfile: {
-      repositoryIdentity: repositoryIdentity(
-        profile["repositoryIdentity"],
-        "binding.productProfile.repositoryIdentity",
-        "binding",
-      ),
+      repositoryIdentity: productIdentity,
       sourceRoot: absolutePath(
         profile["sourceRoot"],
         "binding.productProfile.sourceRoot",
@@ -924,7 +929,7 @@ function parseDeploymentBinding(bytes: Buffer): DeploymentBindingDocument {
         }),
     ...(schemaVersion === DEPLOYMENT_BINDING_SCHEMA_VERSION
       ? {
-          governance: parseGovernance(source["governance"]),
+          governance: parseGovernance(source["governance"], productIdentity),
           tracker: parseThinTracker(source["tracker"]),
         }
       : { tracker: parseTracker(source["tracker"]) }),
